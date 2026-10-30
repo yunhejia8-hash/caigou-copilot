@@ -1,0 +1,81 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "autoname": "field:finance_book_name",
+ "creation": "2018-04-13 17:42:43.252224",
+ "description": "A separate set of books, for example to depreciate assets under another rule.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "documentation": "https://docs.frappe.io/erpnext/user/manual/en/finance-book",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "finance_book_name"
+ ],
+ "fields": [
+  {
+   "fieldname": "finance_book_name",
+   "fieldtype": "Data",
+   "label": "Name",
+   "unique": 1
+  }
+ ],
+ "icon": "book",
+ "links": [],
+ "modified": "2026-09-16 11:42:07.000000",
+ "modified_by": "Administrator",
+ "module": "Accounts",
+ "name": "Finance Book",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts User",
+   "share": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Auditor",
+   "share": 1
+  },
+  {
+   "role": "HR Manager",
+   "select": 1
+  },
+  {
+   "role": "Manufacturing Manager",
+   "select": 1
+  },
+  {
+   "role": "Quality Manager",
+   "select": 1
+  }
+ ],
+ "quick_entry": 1,
+ "search_fields": "finance_book_name",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1,
+ "track_seen": 1
+}

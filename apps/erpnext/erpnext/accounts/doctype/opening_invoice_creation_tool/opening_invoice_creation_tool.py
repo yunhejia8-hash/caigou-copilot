@@ -1,0 +1,393 @@
+# Copyright (c) 2017, Frappe Technologies Pvt. Ltd. and contributors
+# For license information, please see license.txt
+
+
+from math import isfinite
+
+import frappe
+from frappe import _, scrub
+from frappe.model.document import Document
+from frappe.model.meta import get_field_precision
+from frappe.query_builder import Case
+from frappe.query_builder.functions import Count, Sum
+from frappe.utils import escape_html, flt, nowdate
+from frappe.utils.background_jobs import enqueue, is_job_enqueued
+
+from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
+    get_accounting_dimensions,
+)
+from erpnext.stock.utils import get_default_stock_uom
+
+
+class OpeningInvoiceCreationTool(Document):
+    # begin: auto-generated types
+    # This code is auto-generated. Do not modify anything in this block.
+
+    from typing import TYPE_CHECKING
+
+    if TYPE_CHECKING:
+        from frappe.types import DF
+
+        from erpnext.accounts.doctype.opening_invoice_creation_tool_item.opening_invoice_creation_tool_item import (
+            OpeningInvoiceCreationToolItem,
+        )
+
+        company: DF.Link
+        cost_center: DF.Link | None
+        create_missing_party: DF.Check
+        invoice_type: DF.Literal["Sales", "Purchase"]
+        invoices: DF.Table[OpeningInvoiceCreationToolItem]
+        project: DF.Link | None
+    # end: auto-generated types
+
+    def onload(self):
+        """Load the Opening Invoice summary"""
+        summary, max_count = self.get_opening_invoice_summary()
+        self.set_onload("opening_invoices_summary", summary)
+        self.set_onload("max_count", max_count)
+        self.set_onload("temporary_opening_account", get_temporary_opening_account(self.company))
+
+    def get_opening_invoice_summary(self):
+        def prepare_invoice_summary(doctype, invoices):
+            # add company wise sales / purchase invoice summary
+            paid_amount = []
+            outstanding_amount = []
+            for invoice in invoices:
+                company = invoice.pop("company")
+                _summary = invoices_summary.get(company, {})
+                _summary.update({"currency": company_wise_currency.get(company), doctype: invoice})
+                invoices_summary.update({company: _summary})
+
+                if invoice.paid_amount:
+                    paid_amount.append(invoice.paid_amount)
+                if invoice.outstanding_amount:
+                    outstanding_amount.append(invoice.outstanding_amount)
+
+            if paid_amount or outstanding_amount:
+                max_count.update(
+                    {
+                        doctype: {
+                            "max_paid": max(paid_amount) if paid_amount else 0.0,
+                            "max_due": max(outstanding_amount) if outstanding_amount else 0.0,
+                        }
+                    }
+                )
+
+        invoices_summary = {}
+        max_count = {}
+        companies = frappe.get_list("Company", fields=["name as company", "default_currency as currency"])
+        if not companies:
+            return None, None
+
+        company_wise_currency = {row.company: row.currency for row in companies}
+        for doctype in ["Sales Invoice", "Purchase Invoice"]:
+            invoice = frappe.qb.DocType(doctype)
+            company = frappe.qb.DocType("Company")
+            outstanding = (
+                Case()
+                .when(invoice.party_account_currency == company.default_currency, invoice.outstanding_amount)
+                .else_(invoice.outstanding_amount * invoice.conversion_rate)
+            )
+            invoices = (
+                frappe.qb.from_(invoice)
+                .join(company)
+                .on(invoice.company == company.name)
+                .select(
+                    invoice.company,
+                    Count(invoice.name).as_("total_invoices"),
+                    Sum(outstanding).as_("outstanding_amount"),
+                )
+                .where(
+                    (invoice.is_opening == "Yes")
+                    & (invoice.docstatus == 1)
+                    & (invoice.company.isin(list(company_wise_currency)))
+                )
+                .groupby(invoice.company)
+            ).run(as_dict=True)
+            prepare_invoice_summary(doctype, invoices)
+
+        invoices_summary_companies = list(invoices_summary.keys())
+
+        for company in invoices_summary_companies:
+            invoices_summary[escape_html(company)] = invoices_summary.pop(company)
+
+        return invoices_summary, max_count
+
+    def validate_company(self):
+        if not self.company:
+            frappe.throw(_("Please select the Company"))
+
+    def set_missing_values(self, row):
+        row.qty = 1.0 if row.qty in (None, "") else flt(row.qty)
+        if not isfinite(row.qty) or row.qty <= 0:
+            frappe.throw(_("Row #{0}: Quantity must be a positive number").format(row.idx))
+        row.currency = row.currency or frappe.get_cached_value("Company", self.company, "default_currency")
+        row.temporary_opening_account = row.temporary_opening_account or get_temporary_opening_account(
+            self.company
+        )
+        row.party_type = "Customer" if self.invoice_type == "Sales" else "Supplier"
+        row.item_name = row.item_name or _("Opening Invoice Item")
+        row.posting_date = row.posting_date or nowdate()
+        row.due_date = row.due_date or nowdate()
+
+    def validate_mandatory_invoice_fields(self, row):
+        if self.create_missing_party:
+            if not row.party and not row.party_name:
+                frappe.throw(_("Row #{}: Either Party ID or Party Name is required").format(row.idx))
+
+            if not row.party and row.party_name:
+                row.party = self.add_party(row.party_type, row.party_name)
+
+            if row.party and not frappe.db.exists(row.party_type, row.party):
+                row.party = self.add_party(row.party_type, row.party)
+
+        else:
+            if not row.party:
+                frappe.throw(_("Row #{}: Party ID is required").format(row.idx))
+            if not frappe.db.exists(row.party_type, row.party):
+                frappe.throw(
+                    _("Row #{}: {} {} does not exist.").format(
+                        row.idx, frappe.bold(row.party_type), frappe.bold(row.party)
+                    )
+                )
+
+        mandatory_error_msg = _("Row #{0}: {1} is required to create the Opening {2} Invoices")
+        for d in ("Outstanding Amount", "Temporary Opening Account"):
+            if not row.get(scrub(d)):
+                frappe.throw(mandatory_error_msg.format(row.idx, d, self.invoice_type))
+
+        self.validate_temporary_opening_account(row)
+
+    def validate_temporary_opening_account(self, row):
+        account_type = frappe.get_cached_value("Account", row.temporary_opening_account, "account_type")
+        if account_type != "Temporary":
+            frappe.throw(
+                _("Row #{0}: {1} account is not of type {2}").format(
+                    row.idx, row.temporary_opening_account, "Temporary"
+                )
+            )
+
+    def get_invoices(self):
+        invoices = []
+        for row in self.invoices:
+            if not row:
+                continue
+            self.set_missing_values(row)
+            self.validate_mandatory_invoice_fields(row)
+            invoice = self.get_invoice_dict(row)
+            company_details = (
+                frappe.get_cached_value(
+                    "Company", self.company, ["default_currency", "default_letter_head"], as_dict=1
+                )
+                or {}
+            )
+
+            if company_details:
+                invoice.update(
+                    {
+                        "currency": row.currency,
+                        "letter_head": company_details.get("default_letter_head"),
+                    }
+                )
+            invoices.append(invoice)
+
+        return invoices
+
+    def add_party(self, party_type, party):
+        parties = frappe.get_list(
+            party_type, filters={scrub(party_type) + "_name": party}, pluck="name", limit_page_length=2
+        )
+        if len(parties) > 1:
+            frappe.throw(
+                _("Multiple {0} records match {1}. Please select the Party ID.").format(
+                    party_type, frappe.bold(party)
+                )
+            )
+        if parties:
+            return parties[0]
+
+        party_doc = frappe.new_doc(party_type)
+        if party_type == "Customer":
+            party_doc.customer_name = party
+        else:
+            supplier_group = frappe.db.get_single_value("Buying Settings", "supplier_group")
+            if not supplier_group:
+                frappe.throw(_("Please Set Supplier Group in Buying Settings."))
+
+            party_doc.supplier_name = party
+            party_doc.supplier_group = supplier_group
+
+        party_doc.flags.ignore_mandatory = True
+        party_doc.save()
+        return party_doc.name
+
+    def get_invoice_dict(self, row=None):
+        def get_item_dict():
+            cost_center = row.get("cost_center") or frappe.get_cached_value(
+                "Company", self.company, "cost_center"
+            )
+            if not cost_center:
+                frappe.throw(
+                    _("Please set the Default Cost Center in {0} company.").format(frappe.bold(self.company))
+                )
+
+            income_expense_account_field = (
+                "income_account" if row.party_type == "Customer" else "expense_account"
+            )
+            default_uom = get_default_stock_uom()
+            qty = row.qty
+            description = row.item_name or _("Opening Invoice Item")
+            item_meta = frappe.get_meta(f"{self.invoice_type} Invoice Item")
+            qty_precision = get_field_precision(item_meta.get_field("qty"))
+            rate_precision = get_field_precision(item_meta.get_field("rate"), currency=row.currency)
+            amount_precision = get_field_precision(item_meta.get_field("amount"), currency=row.currency)
+            amount = flt(row.outstanding_amount, amount_precision)
+            rate = flt(amount / qty, rate_precision)
+            if flt(qty, qty_precision) != qty or flt(rate * qty, amount_precision) != amount:
+                # Opening balances must retain the exact amount, even when the unit rate cannot.
+                description += "<br>" + _("Original Quantity: {0}").format(qty)
+                qty, rate = 1, amount
+
+            item_dict = frappe._dict(
+                {
+                    "uom": default_uom,
+                    "rate": rate or 0.0,
+                    "qty": qty,
+                    "conversion_factor": 1.0,
+                    "item_name": row.item_name or "Opening Invoice Item",
+                    "description": description,
+                    income_expense_account_field: row.temporary_opening_account,
+                    "cost_center": cost_center,
+                    "project": row.get("project") or self.get("project"),
+                }
+            )
+
+            for dimension in get_accounting_dimensions():
+                item_dict.update({dimension: row.get(dimension)})
+
+            return item_dict
+
+        item = get_item_dict()
+
+        invoice = frappe._dict(
+            {
+                "items": [item],
+                "is_opening": "Yes",
+                "set_posting_time": 1,
+                "company": self.company,
+                "cost_center": self.cost_center,
+                "due_date": row.due_date,
+                "posting_date": row.posting_date,
+                frappe.scrub(row.party_type): row.party,
+                "is_pos": 0,
+                "doctype": "Sales Invoice" if self.invoice_type == "Sales" else "Purchase Invoice",
+                "update_stock": 0,  # important: https://github.com/frappe/erpnext/pull/23559
+                "invoice_number": row.invoice_number,
+                "disable_rounded_total": 1,
+            }
+        )
+
+        if self.invoice_type == "Purchase" and row.supplier_invoice_date:
+            invoice.update({"bill_date": row.supplier_invoice_date})
+
+        accounting_dimension = get_accounting_dimensions()
+        for dimension in accounting_dimension:
+            invoice.update({dimension: self.get(dimension) or item.get(dimension)})
+
+        return invoice
+
+    @frappe.whitelist()
+    def make_invoices(self):
+        self.validate_company()
+        invoices = self.get_invoices()
+        if len(invoices) < 50:
+            return start_import(invoices)
+        else:
+            from frappe.utils.scheduler import is_scheduler_inactive
+
+            if is_scheduler_inactive() and not frappe.in_test:
+                frappe.throw(_("Scheduler is inactive. Cannot import data."), title=_("Scheduler Inactive"))
+
+            job_id = f"opening_invoice::{self.name}"
+
+            if not is_job_enqueued(job_id):
+                enqueue(
+                    start_import,
+                    queue="default",
+                    timeout=6000,
+                    event="opening_invoice_creation",
+                    job_id=job_id,
+                    invoices=invoices,
+                    now=frappe.conf.developer_mode or frappe.in_test,
+                )
+
+
+def start_import(invoices):
+    errors = 0
+    names = []
+    total = len(invoices)
+    for idx, d in enumerate(invoices):
+        # Scope each invoice to a savepoint so a failure only undoes that invoice.
+        # A plain rollback() would discard the whole transaction — including invoices
+        # imported earlier in this batch and the error logs of earlier failures (the
+        # latter only survive on mariadb because the Error Log table is MyISAM; on
+        # postgres they would be lost). Rolling back to a savepoint keeps both.
+        savepoint = f"opening_invoice_{frappe.generate_hash(length=8)}"
+        frappe.db.savepoint(savepoint)
+        is_last = idx == total - 1
+        try:
+            invoice_number = None
+            if d.invoice_number:
+                invoice_number = d.invoice_number
+            doc = frappe.get_doc(d)
+            doc.flags.ignore_mandatory = True
+            # the outstanding amount is entered inclusive of tax, so taxes must not
+            # be added on top of it
+            doc.flags.dont_auto_add_taxes = True
+            doc.insert(set_name=invoice_number)
+            doc.submit()
+            if not frappe.in_test:
+                frappe.db.commit()
+            names.append(doc.name)
+            publish(idx, total, d.doctype, errors=errors if is_last else None)
+        except Exception:
+            errors += 1
+            frappe.db.rollback()
+            doc.log_error("Opening invoice creation failed")
+            publish(idx, total, d.doctype, errors=errors if is_last else None)
+    if errors:
+        frappe.msgprint(
+            _("You had {} errors while creating opening invoices. Check {} for more details").format(
+                errors, "<a href='/app/List/Error Log' class='variant-click'>Error Log</a>"
+            ),
+            indicator="red",
+            title=_("Error Occurred"),
+        )
+    return names
+
+
+def publish(index, total, doctype, errors=None):
+    frappe.publish_realtime(
+        "opening_invoice_creation_progress",
+        dict(
+            title=_("Opening Invoice Creation In Progress"),
+            message=_("Creating {} out of {} {}").format(index + 1, total, doctype),
+            count=index + 1,
+            total=total,
+            errors=errors,
+        ),
+        user=frappe.session.user,
+    )
+
+
+@frappe.whitelist()
+def get_temporary_opening_account(company=None):
+    if not company:
+        return
+
+    frappe.has_permission("Company", "read", company, throw=True)
+    accounts = frappe.get_all("Account", filters={"company": company, "account_type": "Temporary"})
+    if not accounts:
+        frappe.throw(_("Please add a Temporary Opening account in Chart of Accounts"))
+
+    return accounts[0].name

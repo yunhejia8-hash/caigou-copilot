@@ -1,0 +1,12 @@
+{
+ "doctype": "Dock",
+ "name": "erpnext",
+ "app": "erpnext",
+ "standard": 1,
+ "items": [
+  {"link_type": "Sidebar", "link_to": "Buying", "title": "采购", "icon": "shopping-cart-soft"},
+  {"link_type": "Sidebar", "link_to": "Selling", "title": "销售", "icon": "storefront-soft"},
+  {"link_type": "Sidebar", "link_to": "Stock", "title": "库存", "icon": "shelf-rack-soft"},
+  {"link_type": "Sidebar", "link_to": "Manufacturing", "title": "生产", "icon": "factory-soft"}
+ ]
+}

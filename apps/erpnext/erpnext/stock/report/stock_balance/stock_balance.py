@@ -1,0 +1,997 @@
+# Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
+# License: GNU General Public License v3. See license.txt
+
+
+import json
+from operator import itemgetter
+from typing import Any, TypedDict
+
+import frappe
+from frappe import _
+from frappe.query_builder import Tuple
+from frappe.query_builder.functions import Coalesce, Count
+from frappe.utils import add_days, cint, date_diff, flt, getdate
+from frappe.utils.nestedset import get_descendants_of
+from pypika import Order
+from pypika.analytics import RowNumber
+
+import erpnext
+from erpnext.stock.doctype.inventory_dimension.inventory_dimension import get_inventory_dimensions
+from erpnext.stock.doctype.stock_closing_entry.stock_closing_entry import StockClosing
+from erpnext.stock.doctype.warehouse.warehouse import apply_warehouse_filter
+from erpnext.stock.report.stock_ageing.stock_ageing import (
+    FIFOSlots,
+    get_average_age,
+    normalize_fifo_queue,
+)
+from erpnext.stock.utils import add_additional_uom_columns
+from erpnext.stock.valuation_adjustment import AdjustmentNetting
+
+
+class StockBalanceFilter(TypedDict):
+    company: str | None
+    from_date: str
+    to_date: str
+    item_group: str | None
+    item: list[str] | None
+    warehouse: list[str] | None
+    warehouse_type: str | None
+    include_uom: str | None  # include extra info in converted UOM
+    show_stock_ageing_data: bool
+    show_variant_attributes: bool
+    show_alt_uom_balance: bool
+
+
+SLEntry = dict[str, Any]
+
+
+def execute(filters: StockBalanceFilter | None = None):
+    return StockBalanceReport(filters).run()
+
+
+class StockBalanceReport:
+    def __init__(self, filters: StockBalanceFilter | None) -> None:
+        self.filters = filters
+        self.from_date = getdate(filters.get("from_date"))
+        self.to_date = getdate(filters.get("to_date"))
+
+        self.start_from = None
+        self.data = []
+        self.columns = []
+        self.sle_entries: list[SLEntry] = []
+        self.item_warehouse_balances = {}
+        self.set_company_currency()
+
+    def set_company_currency(self) -> None:
+        if self.filters.get("company"):
+            self.company_currency = erpnext.get_company_currency(self.filters.get("company"))
+        else:
+            self.company_currency = frappe.db.get_single_value("Global Defaults", "default_currency")
+
+    def run(self):
+        self.float_precision = cint(frappe.db.get_default("float_precision")) or 3
+
+        self.item_warehouse_map = frappe._dict({})
+        self.inventory_dimensions = self.get_inventory_dimension_fields()
+        self.prepare_opening_stock()
+        self.prepare_sle_query()
+        self.prepare_item_warehouse_map_for_current_period()
+        self.set_pool_rate_on_dimension_rows()
+        self.prepare_new_data()
+
+        if not self.columns:
+            self.columns = self.get_columns()
+
+        self.add_additional_uom_columns()
+        self.add_alt_uom_columns()
+
+        return self.columns, self.data
+
+    def prepare_opening_stock(self) -> None:
+        opening_entries = self.get_entries_from_stock_closing_balance()
+
+        for entry in opening_entries:
+            key = self.get_group_by_key(entry)
+
+            self.item_warehouse_map[key] = frappe._dict(
+                {
+                    "item_code": entry.item_code,
+                    "warehouse": entry.warehouse,
+                    "item_group": entry.item_group,
+                    "company": entry.company,
+                    "currency": self.company_currency,
+                    "stock_uom": entry.stock_uom,
+                    "item_name": entry.item_name,
+                    "opening_qty": entry.actual_qty,
+                    "opening_val": entry.stock_value_difference,
+                    "in_qty": 0.0,
+                    "in_val": 0.0,
+                    "out_qty": 0.0,
+                    "out_val": 0.0,
+                    "bal_qty": entry.actual_qty,
+                    "bal_val": entry.stock_value_difference,
+                    "val_rate": flt(entry.stock_value_difference / entry.actual_qty)
+                    if entry.actual_qty
+                    else 0.0,
+                }
+            )
+
+    def get_entries_from_stock_closing_balance(self) -> list:
+        # The SLE query then starts from the very first entry, so loading the closing balance as
+        # opening too would count everything up to the closing date twice.
+        if self.filters.get("ignore_closing_balance"):
+            return []
+
+        # Dimension-wise rows need the balance of each combination of dimension values, including
+        # stock with none. The closing balance keeps only item-warehouse and per-dimension totals,
+        # so the SLE query starts from the very first entry instead.
+        if self.filters.get("show_dimension_wise_stock"):
+            return []
+
+        stk_cl_obj = StockClosing(self.filters.company, self.from_date, self.from_date)
+        if not stk_cl_obj.last_closing_balance:
+            return []
+
+        self.start_from = add_days(stk_cl_obj.last_closing_balance.to_date, 1)
+
+        closing_entry = stk_cl_obj.last_closing_balance.name
+        opening_entries = self.get_closing_balance_query(closing_entry).run(as_dict=True)
+
+        # Batch wise rows carry no inventory dimension key either, but they share the item and
+        # warehouse group key with the item level row and would overwrite its opening.
+        return [d for d in opening_entries if not d.batch_no]
+
+    def get_closing_balance_query(self, stock_closing_entry):
+        closing = frappe.qb.DocType("Stock Closing Balance")
+        item_table = frappe.qb.DocType("Item")
+
+        query = (
+            frappe.qb.from_(closing)
+            .inner_join(item_table)
+            .on(closing.item_code == item_table.name)
+            .select(closing.star)
+            .where(closing.stock_closing_entry == stock_closing_entry)
+        )
+
+        query = self.apply_closing_dimension_filters(query, closing)
+        query = self.apply_warehouse_filters(query, closing)
+        return self.apply_items_filters(query, item_table)
+
+    def apply_closing_dimension_filters(self, query, closing):
+        dimension_keys = []
+        for field in self.inventory_dimensions:
+            if values := self.filters.get(field):
+                dimension_keys.append(field)
+                query = query.where(closing[field].isin(values if isinstance(values, list) else [values]))
+
+        if dimension_keys:
+            return query.where(
+                closing.inventory_dimension_key == json.dumps(("item_code", "warehouse", *dimension_keys))
+            )
+
+        return query.where(closing.inventory_dimension_key.isnull() | (closing.inventory_dimension_key == ""))
+
+    def prepare_sle_query(self):
+        sle = frappe.qb.DocType("Stock Ledger Entry")
+        item_table = frappe.qb.DocType("Item")
+
+        query = (
+            frappe.qb.from_(sle)
+            .inner_join(item_table)
+            .on(sle.item_code == item_table.name)
+            .select(
+                sle.item_code,
+                sle.warehouse,
+                sle.posting_date,
+                sle.actual_qty,
+                sle.valuation_rate,
+                sle.company,
+                sle.voucher_type,
+                sle.qty_after_transaction,
+                sle.stock_value_difference,
+                sle.item_code.as_("name"),
+                sle.voucher_no,
+                sle.stock_value,
+                sle.batch_no,
+                sle.serial_no,
+                sle.serial_and_batch_bundle,
+                sle.has_serial_no,
+                sle.voucher_detail_no,
+                sle.is_adjustment_entry,
+                item_table.item_group,
+                item_table.stock_uom,
+                item_table.item_name,
+            )
+            .where((sle.docstatus < 2) & (sle.is_cancelled == 0))
+            .orderby(sle.posting_datetime)
+            .orderby(sle.creation)
+        )
+
+        query = self.apply_inventory_dimensions_filters(query, sle)
+        query = self.apply_warehouse_filters(query, sle)
+        query = self.apply_items_filters(query, item_table)
+        query = self.apply_date_filters(query, sle)
+
+        if self.filters.get("company"):
+            query = query.where(sle.company == self.filters.get("company"))
+
+        self.sle_query = query
+
+    def prepare_item_warehouse_map_for_current_period(self):
+        self.opening_vouchers = self.get_opening_vouchers()
+
+        if self.filters.get("show_stock_ageing_data"):
+            self.sle_entries = self.sle_query.run(as_dict=True)
+
+        self.prepare_stock_reco_voucher_wise_count()
+
+        # HACK: This is required to avoid causing db query in flt
+        _system_settings = frappe.get_cached_doc("System Settings")
+        self.adjustment_netting = AdjustmentNetting()
+        self.latest_valuation_rates = {}
+        track_rates = self.shows_whole_pools
+        with frappe.db.unbuffered_cursor():
+            if not self.filters.get("show_stock_ageing_data"):
+                self.sle_entries = self.sle_query.run(as_dict=True, as_iterator=True)
+
+            for entry in self.adjustment_netting.net(self.sle_entries):
+                group_by_key = self.get_group_by_key(entry)
+                if group_by_key not in self.item_warehouse_map:
+                    self.initialize_data(group_by_key, entry)
+
+                self.prepare_item_warehouse_map(entry, group_by_key)
+                if track_rates:
+                    self.latest_valuation_rates[entry.item_code, entry.warehouse] = entry.valuation_rate
+
+        self.item_warehouse_map = filter_items_with_no_transactions(
+            self.item_warehouse_map, self.float_precision, self.inventory_dimensions
+        )
+
+    def set_pool_rate_on_dimension_rows(self):
+        if not (self.filters.get("show_dimension_wise_stock") or self.has_dimension_filter):
+            return
+
+        items = self.get_pool_valuation_details({row.item_code for row in self.item_warehouse_map.values()})
+        rows = [row for row in self.item_warehouse_map.values() if self.is_valued_in_pool(row, items)]
+        rates = self.latest_valuation_rates
+        rates.update(
+            self.get_latest_valuation_rates(
+                [row for row in rows if (row.item_code, row.warehouse) not in rates]
+            )
+        )
+        pools = self.get_pool_balances(rows)
+        for row in rows:
+            row.val_rate = rates.get((row.item_code, row.warehouse), 0.0)
+            row.bal_val = row.bal_qty * row.val_rate
+
+        self.add_stranded_pool_values(pools, rates)
+
+    def get_pool_balances(self, rows) -> dict:
+        """Whole item and warehouse balances, read before the rows are revalued."""
+        if not self.shows_whole_pools:
+            return {}
+
+        pools = {}
+        for row in rows:
+            key = (row.item_code, row.warehouse)
+            if key not in pools:
+                balance = self.item_warehouse_balances.get(key, row)
+                pools[key] = frappe._dict(row=row, bal_qty=balance.bal_qty, bal_val=balance.bal_val)
+
+        return pools
+
+    def add_stranded_pool_values(self, pools, rates):
+        """Keep pool value its qty does not carry, like a residue at zero qty, on the row without dimensions."""
+        for key, pool in pools.items():
+            stranded_value = flt(pool.bal_val) - flt(pool.bal_qty) * rates.get(key, 0.0)
+            if not flt(stranded_value, self.float_precision):
+                continue
+
+            if key not in self.item_warehouse_map:
+                self.initialize_data(key, pool.row)
+
+            self.item_warehouse_map[key].bal_val += stranded_value
+
+    @property
+    def has_dimension_filter(self) -> bool:
+        return any(self.filters.get(field) for field in self.inventory_dimensions)
+
+    @property
+    def shows_whole_pools(self) -> bool:
+        return bool(self.filters.get("show_dimension_wise_stock")) and not self.has_dimension_filter
+
+    def get_pool_valuation_details(self, item_codes: set) -> dict:
+        if not item_codes:
+            return {}
+
+        items = frappe.get_all(
+            "Item",
+            filters={"name": ("in", list(item_codes))},
+            fields=[
+                "name",
+                "has_batch_no",
+                "has_serial_no",
+                "use_serial_no_wise_valuation",
+                "valuation_method",
+            ],
+        )
+        return {item.name: item for item in items}
+
+    def is_valued_in_pool(self, row, items: dict) -> bool:
+        item = items[row.item_code]
+        if item.has_serial_no:
+            return not item.use_serial_no_wise_valuation
+
+        if item.has_batch_no:
+            valuation_method = item.valuation_method or frappe.get_cached_value(
+                "Company", row.company, "valuation_method"
+            )
+            return valuation_method == "Moving Average" and bool(
+                frappe.get_single_value("Stock Settings", "do_not_use_batchwise_valuation")
+            )
+
+        return True
+
+    def get_latest_valuation_rates(self, rows) -> dict:
+        if not rows:
+            return {}
+
+        sle = frappe.qb.DocType("Stock Ledger Entry")
+        ranked = (
+            frappe.qb.from_(sle)
+            .select(
+                sle.item_code,
+                sle.warehouse,
+                sle.valuation_rate,
+                RowNumber()
+                .over(sle.item_code, sle.warehouse)
+                .orderby(sle.posting_datetime, sle.creation, sle.name, order=Order.desc)
+                .as_("row_no"),
+            )
+            .where(
+                (sle.is_cancelled == 0)
+                & (sle.posting_date <= self.to_date)
+                & Tuple(sle.item_code, sle.warehouse).isin({(row.item_code, row.warehouse) for row in rows})
+            )
+        ).as_("ranked")
+        entries = (
+            frappe.qb.from_(ranked)
+            .select(ranked.item_code, ranked.warehouse, ranked.valuation_rate)
+            .where(ranked.row_no == 1)
+            .run(as_dict=True)
+        )
+        return {(entry.item_code, entry.warehouse): flt(entry.valuation_rate) for entry in entries}
+
+    def prepare_stock_reco_voucher_wise_count(self):
+        self.stock_reco_voucher_wise_count = frappe._dict()
+
+        doctype = frappe.qb.DocType("Stock Ledger Entry")
+        item = frappe.qb.DocType("Item")
+
+        query = (
+            frappe.qb.from_(doctype)
+            .inner_join(item)
+            .on(doctype.item_code == item.name)
+            .select(doctype.voucher_detail_no, Count(doctype.name).as_("count"))
+            .where(
+                (doctype.voucher_type == "Stock Reconciliation")
+                & (doctype.docstatus < 2)
+                & (doctype.is_cancelled == 0)
+                & (item.has_serial_no == 1)
+            )
+            .groupby(doctype.voucher_detail_no)
+        )
+
+        if items := self.filters.item_code:
+            if isinstance(items, str):
+                items = [items]
+
+            query = query.where(item.name.isin(items))
+
+        if self.filters.item_group:
+            childrens = []
+            childrens.append(self.filters.item_group)
+            if item_group_childrens := get_descendants_of(
+                "Item Group", self.filters.item_group, ignore_permissions=True
+            ):
+                childrens.extend(item_group_childrens)
+
+            if childrens:
+                query = query.where(item.item_group.isin(childrens))
+
+        if warehouses := self.filters.get("warehouse"):
+            if isinstance(warehouses, str):
+                warehouses = [warehouses]
+
+            childrens = []
+            for warehouse in warehouses:
+                childrens.append(warehouse)
+                if warehouse_childrens := get_descendants_of("Warehouse", warehouse, ignore_permissions=True):
+                    childrens.extend(warehouse_childrens)
+
+            if childrens:
+                query = query.where(doctype.warehouse.isin(childrens))
+
+        data = query.run(as_dict=True)
+        if not data:
+            return
+
+        for row in data:
+            if row.count != 1:
+                continue
+
+            sr_item = frappe.db.get_value(
+                "Stock Reconciliation Item", row.voucher_detail_no, ["current_qty", "qty"], as_dict=True
+            )
+
+            if sr_item.qty and sr_item.current_qty:
+                self.stock_reco_voucher_wise_count[row.voucher_detail_no] = sr_item.current_qty
+
+    def prepare_new_data(self):
+        if self.filters.get("show_stock_ageing_data"):
+            self.filters["show_warehouse_wise_stock"] = True
+            item_wise_fifo_queue = FIFOSlots(self.filters).generate()
+
+        del self.sle_entries
+
+        sre_details = self.get_sre_reserved_qty_details()
+
+        variant_values = {}
+        if self.filters.get("show_variant_attributes"):
+            variant_values = self.get_variant_values_for()
+
+        for _key, report_data in self.item_warehouse_map.items():
+            if variant_data := variant_values.get(report_data.item_code):
+                report_data.update(variant_data)
+
+            if self.filters.get("show_stock_ageing_data"):
+                report_data.update(self.get_row_stock_ageing_data(report_data, item_wise_fifo_queue))
+
+            report_data.update(
+                {"reserved_stock": sre_details.get((report_data.item_code, report_data.warehouse), 0.0)}
+            )
+
+            if (
+                not self.filters.get("include_zero_stock_items")
+                and report_data
+                and report_data.bal_qty == 0
+                and report_data.bal_val == 0
+            ):
+                continue
+
+            self.data.append(report_data)
+
+    def get_sre_reserved_qty_details(self) -> dict:
+        from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import (
+            get_sre_reserved_qty_for_items_and_warehouses as get_reserved_qty_details,
+        )
+
+        item_code_list, warehouse_list = [], []
+        for d in self.item_warehouse_map:
+            item_code_list.append(d[0])
+            warehouse_list.append(d[1])
+
+        return get_reserved_qty_details(item_code_list, warehouse_list)
+
+    def prepare_item_warehouse_map(self, entry, group_by_key):
+        qty_dict = self.item_warehouse_map[group_by_key]
+        balance = self.get_item_warehouse_balance(entry, qty_dict)
+        for field in self.inventory_dimensions:
+            qty_dict[field] = entry.get(field)
+
+        if (
+            entry.voucher_type == "Stock Reconciliation"
+            and self.is_reconciled_balance(entry)
+            and (not entry.batch_no or entry.serial_no or entry.serial_and_batch_bundle)
+            and len(group_by_key) == 2
+        ):
+            if entry.serial_no and entry.voucher_detail_no in self.stock_reco_voucher_wise_count:
+                qty_dict.opening_qty -= self.stock_reco_voucher_wise_count.get(entry.voucher_detail_no, 0)
+                qty_dict.bal_qty = 0.0
+                balance.bal_qty = 0.0
+                qty_diff = flt(entry.actual_qty)
+                value_diff = flt(entry.stock_value_difference)
+            else:
+                qty_diff = flt(entry.qty_after_transaction) - flt(balance.bal_qty)
+                value_diff = flt(entry.stock_value) - flt(balance.bal_val)
+        else:
+            qty_diff = flt(entry.actual_qty)
+            value_diff = flt(entry.stock_value_difference)
+
+        if entry.posting_date < self.from_date or entry.voucher_no in self.opening_vouchers.get(
+            entry.voucher_type, []
+        ):
+            qty_dict.opening_qty += qty_diff
+            qty_dict.opening_val += value_diff
+
+        elif entry.posting_date >= self.from_date and entry.posting_date <= self.to_date:
+            if flt(qty_diff, self.float_precision) >= 0:
+                qty_dict.in_qty += qty_diff
+            else:
+                qty_dict.out_qty += abs(qty_diff)
+
+            if flt(value_diff, self.float_precision) >= 0:
+                qty_dict.in_val += value_diff
+            else:
+                qty_dict.out_val += abs(value_diff)
+
+        qty_dict.val_rate = entry.valuation_rate
+        qty_dict.bal_qty += qty_diff
+        qty_dict.bal_val += value_diff
+        if balance is not qty_dict:
+            balance.bal_qty += qty_diff
+            balance.bal_val += value_diff
+
+    def is_reconciled_balance(self, entry) -> bool:
+        """A write-off of stranded value moves nothing, so it is a plain delta. An Adjustment Entry
+        resets the item and warehouse to the stock its rows hold, so its balance is the new balance."""
+        if entry.is_adjustment_entry:
+            return self.adjustment_netting.is_adjustment(entry)
+
+        return True
+
+    def get_item_warehouse_balance(self, entry, qty_dict) -> frappe._dict:
+        """Balance of the whole item and warehouse, which a dimension-wise row holds only part of."""
+        if not self.filters.get("show_dimension_wise_stock"):
+            return qty_dict
+
+        key = (entry.item_code, entry.warehouse)
+        if key not in self.item_warehouse_balances:
+            opening = self.item_warehouse_map.get(key) or frappe._dict(bal_qty=0.0, bal_val=0.0)
+            self.item_warehouse_balances[key] = frappe._dict(bal_qty=opening.bal_qty, bal_val=opening.bal_val)
+
+        return self.item_warehouse_balances[key]
+
+    def initialize_data(self, group_by_key, entry):
+        self.item_warehouse_map[group_by_key] = frappe._dict(
+            {
+                "item_code": entry.item_code,
+                "warehouse": entry.warehouse,
+                "item_group": entry.item_group,
+                "company": entry.company,
+                "currency": self.company_currency,
+                "stock_uom": entry.stock_uom,
+                "item_name": entry.item_name,
+                "opening_qty": 0.0,
+                "opening_val": 0.0,
+                "in_qty": 0.0,
+                "in_val": 0.0,
+                "out_qty": 0.0,
+                "out_val": 0.0,
+                "bal_qty": 0.0,
+                "bal_val": 0.0,
+                "val_rate": 0.0,
+            }
+        )
+
+    def get_group_by_key(self, row) -> tuple:
+        group_by_key = [row.item_code, row.warehouse]
+
+        for fieldname in self.inventory_dimensions:
+            if not row.get(fieldname):
+                continue
+
+            if self.filters.get(fieldname) or self.filters.get("show_dimension_wise_stock"):
+                group_by_key.append(row.get(fieldname))
+
+        return tuple(group_by_key)
+
+    def apply_inventory_dimensions_filters(self, query, sle) -> str:
+        inventory_dimension_fields = self.get_inventory_dimension_fields()
+        if inventory_dimension_fields:
+            for fieldname in inventory_dimension_fields:
+                query = query.select(fieldname)
+                if self.filters.get(fieldname):
+                    query = query.where(sle[fieldname].isin(self.filters.get(fieldname)))
+
+        return query
+
+    def apply_warehouse_filters(self, query, sle) -> str:
+        warehouse_table = frappe.qb.DocType("Warehouse")
+
+        if self.filters.get("warehouse"):
+            query = apply_warehouse_filter(query, sle, self.filters)
+
+        if warehouse_type := self.filters.get("warehouse_type"):
+            query = query.where(
+                sle.warehouse.isin(
+                    frappe.qb.from_(warehouse_table)
+                    .select(warehouse_table.name)
+                    .where(warehouse_table.warehouse_type == warehouse_type)
+                )
+            )
+
+        return query
+
+    def apply_items_filters(self, query, item_table) -> str:
+        if item_group := self.filters.get("item_group"):
+            children = get_descendants_of("Item Group", item_group, ignore_permissions=True)
+            query = query.where(item_table.item_group.isin([*children, item_group]))
+
+        if item_codes := self.filters.get("item_code"):
+            query = query.where(item_table.name.isin(item_codes))
+
+        if brand := self.filters.get("brand"):
+            query = query.where(item_table.brand == brand)
+
+        return query
+
+    def apply_date_filters(self, query, sle) -> str:
+        if not self.filters.ignore_closing_balance and self.start_from:
+            query = query.where(sle.posting_date >= self.start_from)
+
+        if self.to_date:
+            query = query.where(sle.posting_date <= self.to_date)
+
+        return query
+
+    def get_columns(self):
+        columns = [
+            {
+                "label": _("Item"),
+                "fieldname": "item_code",
+                "fieldtype": "Link",
+                "options": "Item",
+                "width": 100,
+            },
+            {"label": _("Item Name"), "fieldname": "item_name", "width": 150},
+            {
+                "label": _("Item Group"),
+                "fieldname": "item_group",
+                "fieldtype": "Link",
+                "options": "Item Group",
+                "width": 100,
+            },
+            {
+                "label": _("Warehouse"),
+                "fieldname": "warehouse",
+                "fieldtype": "Link",
+                "options": "Warehouse",
+                "width": 100,
+            },
+        ]
+
+        if self.filters.get("show_dimension_wise_stock"):
+            for dimension in get_inventory_dimensions():
+                columns.append(
+                    {
+                        "label": _(dimension.doctype),
+                        "fieldname": dimension.fieldname,
+                        "fieldtype": "Link",
+                        "options": dimension.doctype,
+                        "width": 110,
+                    }
+                )
+
+        columns.extend(
+            [
+                {
+                    "label": _("Stock UOM"),
+                    "fieldname": "stock_uom",
+                    "fieldtype": "Link",
+                    "options": "UOM",
+                    "width": 90,
+                },
+                {
+                    "label": _("Balance Qty"),
+                    "fieldname": "bal_qty",
+                    "fieldtype": "Float",
+                    "width": 100,
+                    "convertible": "qty",
+                },
+                {
+                    "label": _("Balance Value"),
+                    "fieldname": "bal_val",
+                    "fieldtype": "Currency",
+                    "width": 100,
+                    "options": "Company:company:default_currency",
+                },
+                {
+                    "label": _("Opening Qty"),
+                    "fieldname": "opening_qty",
+                    "fieldtype": "Float",
+                    "width": 100,
+                    "convertible": "qty",
+                },
+                {
+                    "label": _("Opening Value"),
+                    "fieldname": "opening_val",
+                    "fieldtype": "Currency",
+                    "width": 110,
+                    "options": "Company:company:default_currency",
+                },
+                {
+                    "label": _("In Qty"),
+                    "fieldname": "in_qty",
+                    "fieldtype": "Float",
+                    "width": 80,
+                    "convertible": "qty",
+                },
+                {"label": _("In Value"), "fieldname": "in_val", "fieldtype": "Float", "width": 80},
+                {
+                    "label": _("Out Qty"),
+                    "fieldname": "out_qty",
+                    "fieldtype": "Float",
+                    "width": 80,
+                    "convertible": "qty",
+                },
+                {"label": _("Out Value"), "fieldname": "out_val", "fieldtype": "Float", "width": 80},
+                {
+                    "label": _("Valuation Rate"),
+                    "fieldname": "val_rate",
+                    "fieldtype": self.filters.valuation_field_type or "Currency",
+                    "width": 90,
+                    "convertible": "rate",
+                    "options": "Company:company:default_currency"
+                    if self.filters.valuation_field_type == "Currency"
+                    else None,
+                },
+                {
+                    "label": _("Reserved Stock"),
+                    "fieldname": "reserved_stock",
+                    "fieldtype": "Float",
+                    "width": 80,
+                    "convertible": "qty",
+                },
+                {
+                    "label": _("Company"),
+                    "fieldname": "company",
+                    "fieldtype": "Link",
+                    "options": "Company",
+                    "width": 100,
+                },
+            ]
+        )
+
+        if self.filters.get("show_stock_ageing_data"):
+            columns += [
+                {"label": _("Average Age"), "fieldname": "average_age", "width": 100},
+                {"label": _("Earliest Age"), "fieldname": "earliest_age", "width": 100},
+                {"label": _("Latest Age"), "fieldname": "latest_age", "width": 100},
+            ]
+
+        if self.filters.get("show_variant_attributes"):
+            columns += [
+                {"label": att_name, "fieldname": att_name, "width": 100}
+                for att_name in get_variants_attributes()
+            ]
+
+        return columns
+
+    def add_additional_uom_columns(self):
+        if not self.filters.get("include_uom"):
+            return
+
+        conversion_factors = self.get_itemwise_conversion_factor()
+        add_additional_uom_columns(self.columns, self.data, self.filters.include_uom, conversion_factors)
+
+    def add_alt_uom_columns(self) -> None:
+        """Add an alternate UOM balance column after the Balance Qty column."""
+        if not self.filters.get("show_alt_uom_balance"):
+            return
+
+        item_alt_uom_map = self.get_item_alt_uom_map()
+        if not item_alt_uom_map:
+            return
+
+        bal_qty_idx = next(
+            (
+                i
+                for i, col in enumerate(self.columns)
+                if isinstance(col, dict) and col.get("fieldname") == "bal_qty"
+            ),
+            None,
+        )
+        if bal_qty_idx is None:
+            return
+
+        # Insert in reverse so "Alt UOM" name column appears before qty column
+        self.columns.insert(
+            bal_qty_idx + 1,
+            {
+                "label": _("Balance Qty (Alt UOM)"),
+                "fieldname": "alt_uom_bal_qty",
+                "fieldtype": "Float",
+                "width": 140,
+            },
+        )
+        self.columns.insert(
+            bal_qty_idx + 1,
+            {
+                "label": _("Alt UOM"),
+                "fieldname": "alt_uom",
+                "fieldtype": "Data",
+                "width": 90,
+            },
+        )
+
+        for row in self.data:
+            alt_uoms = item_alt_uom_map.get(row.item_code, [])
+            if alt_uoms:
+                uom, factor = alt_uoms[0]["uom"], flt(alt_uoms[0]["conversion_factor"])
+                row["alt_uom"] = uom
+                row["alt_uom_bal_qty"] = flt(row.get("bal_qty", 0)) / factor if factor else 0.0
+            else:
+                row["alt_uom"] = ""
+                row["alt_uom_bal_qty"] = 0.0
+
+    def get_item_alt_uom_map(self) -> dict:
+        """Return {item_code: [{uom, conversion_factor}, ...]} for alternate UOMs (excluding stock UOM)."""
+        item_codes = list({d["item_code"] for d in self.data})
+        if not item_codes:
+            return {}
+
+        uom_detail = frappe.qb.DocType("UOM Conversion Detail")
+        item_table = frappe.qb.DocType("Item")
+
+        rows = (
+            frappe.qb.from_(uom_detail)
+            .join(item_table)
+            .on(uom_detail.parent == item_table.name)
+            .select(uom_detail.parent, uom_detail.uom, uom_detail.conversion_factor)
+            .where(
+                (uom_detail.parenttype == "Item")
+                & (uom_detail.parent.isin(item_codes))
+                & (uom_detail.uom != item_table.stock_uom)
+            )
+            .orderby(uom_detail.parent)
+            .orderby(uom_detail.idx)
+        ).run(as_dict=True)
+
+        result: dict = {}
+        for row in rows:
+            result.setdefault(row.parent, [])
+            if not result[row.parent]:  # keep only the first alternate UOM (lowest idx)
+                result[row.parent].append({"uom": row.uom, "conversion_factor": row.conversion_factor})
+
+        return result
+
+    def get_itemwise_conversion_factor(self):
+        items = []
+        if self.filters.item_code or self.filters.item_group:
+            items = [d.item_code for d in self.data]
+
+        table = frappe.qb.DocType("UOM Conversion Detail")
+        query = (
+            frappe.qb.from_(table)
+            .select(
+                table.conversion_factor,
+                table.parent,
+            )
+            .where((table.parenttype == "Item") & (table.uom == self.filters.include_uom))
+        )
+
+        if items:
+            query = query.where(table.parent.isin(items))
+
+        result = query.run(as_dict=1)
+        if not result:
+            return {}
+
+        return {d.parent: d.conversion_factor for d in result}
+
+    def get_variant_values_for(self):
+        """Returns variant values for items."""
+        attribute_map = {}
+        items = []
+        if self.filters.item_code or self.filters.item_group:
+            items = [d.item_code for d in self.data]
+
+        filters = {}
+        if items:
+            filters = {"parent": ("in", items)}
+
+        attribute_info = frappe.get_all(
+            "Item Variant Attribute",
+            fields=["parent", "attribute", "attribute_value"],
+            filters=filters,
+        )
+
+        for attr in attribute_info:
+            attribute_map.setdefault(attr["parent"], {})
+            attribute_map[attr["parent"]].update({attr["attribute"]: attr["attribute_value"]})
+
+        return attribute_map
+
+    def get_opening_vouchers(self):
+        opening_vouchers = {"Stock Entry": [], "Stock Reconciliation": []}
+
+        se = frappe.qb.DocType("Stock Entry")
+        sr = frappe.qb.DocType("Stock Reconciliation")
+
+        vouchers_data = (
+            frappe.qb.from_(
+                (
+                    frappe.qb.from_(se)
+                    .select(se.name, Coalesce("Stock Entry").as_("voucher_type"))
+                    .where((se.docstatus == 1) & (se.posting_date <= self.to_date) & (se.is_opening == "Yes"))
+                )
+                + (
+                    frappe.qb.from_(sr)
+                    .select(sr.name, Coalesce("Stock Reconciliation").as_("voucher_type"))
+                    .where(
+                        (sr.docstatus == 1)
+                        & (sr.posting_date <= self.to_date)
+                        & (sr.purpose == "Opening Stock")
+                    )
+                )
+            ).select("voucher_type", "name")
+        ).run(as_dict=True)
+
+        if vouchers_data:
+            for d in vouchers_data:
+                opening_vouchers[d.voucher_type].append(d.name)
+
+        return opening_vouchers
+
+    @staticmethod
+    def get_inventory_dimension_fields():
+        return [dimension.fieldname for dimension in get_inventory_dimensions()]
+
+    def get_row_stock_ageing_data(self, report_data, item_wise_fifo_queue):
+        fifo_queue = (item_wise_fifo_queue.get((report_data.item_code, report_data.warehouse)) or {}).get(
+            "fifo_queue"
+        )
+
+        stock_ageing_data = {"average_age": 0, "earliest_age": 0, "latest_age": 0}
+        if fifo_queue:
+            stock_ageing_data.update(get_stock_ageing_data(fifo_queue, self.to_date))
+
+        return stock_ageing_data
+
+
+def get_stock_ageing_data(fifo_queue: list, to_date: str) -> dict:
+    stock_ageing_data = {"average_age": 0, "earliest_age": 0, "latest_age": 0}
+    fifo_queue = sorted(filter(itemgetter(1), normalize_fifo_queue(fifo_queue)), key=itemgetter(1))
+
+    if not fifo_queue:
+        return stock_ageing_data
+
+    stock_ageing_data["average_age"] = get_average_age(fifo_queue, to_date)
+    stock_ageing_data["earliest_age"] = date_diff(to_date, fifo_queue[0][1])
+    stock_ageing_data["latest_age"] = date_diff(to_date, fifo_queue[-1][1])
+    stock_ageing_data["fifo_queue"] = fifo_queue
+
+    return stock_ageing_data
+
+
+def filter_items_with_no_transactions(
+    iwb_map, float_precision: float, inventory_dimensions: list | None = None
+):
+    pop_keys = []
+    for group_by_key in iwb_map:
+        qty_dict = iwb_map[group_by_key]
+
+        no_transactions = True
+        for key, val in qty_dict.items():
+            if inventory_dimensions and key in inventory_dimensions:
+                continue
+
+            if key in [
+                "item_code",
+                "warehouse",
+                "item_name",
+                "item_group",
+                "project",
+                "stock_uom",
+                "company",
+            ]:
+                continue
+
+            val = flt(val, float_precision)
+            qty_dict[key] = val
+            if key != "val_rate" and val:
+                no_transactions = False
+
+        if no_transactions:
+            pop_keys.append(group_by_key)
+
+    for key in pop_keys:
+        iwb_map.pop(key)
+
+    return iwb_map
+
+
+def get_variants_attributes() -> list[str]:
+    """Return all item variant attributes."""
+    return frappe.get_all("Item Attribute", pluck="name")

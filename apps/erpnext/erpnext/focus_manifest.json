@@ -1,0 +1,1101 @@
+{
+  "upstream": "9cd11b19575bfc34f092a24f6c8b368c4dd69481",
+  "business_modules": [
+    "buying",
+    "manufacturing",
+    "selling",
+    "stock"
+  ],
+  "removed_modules": [
+    "assets",
+    "bulk_transaction",
+    "communication",
+    "crm",
+    "edi",
+    "erpnext_integrations",
+    "maintenance",
+    "portal",
+    "projects",
+    "quality_management",
+    "support",
+    "telephony"
+  ],
+  "kept_doctypes": [
+    "Account",
+    "Account Category",
+    "Account Closing Balance",
+    "Accounting Dimension",
+    "Accounting Dimension Detail",
+    "Accounting Dimension Filter",
+    "Accounting Period",
+    "Accounts Settings",
+    "Advance Payment Ledger Entry",
+    "Advance Taxes and Charges",
+    "Allowed Dimension",
+    "Allowed To Transact With",
+    "Applicable On Account",
+    "Authorization Control",
+    "Authorization Rule",
+    "BOM",
+    "BOM Creator",
+    "BOM Creator Item",
+    "BOM Creator Material",
+    "BOM Creator Operation",
+    "BOM Explosion Item",
+    "BOM Item",
+    "BOM Operation",
+    "BOM Secondary Item",
+    "BOM Update Batch",
+    "BOM Update Log",
+    "BOM Update Tool",
+    "BOM Website Item",
+    "BOM Website Operation",
+    "Bank",
+    "Bank Account",
+    "Bank Account Balance",
+    "Bank Account Subtype",
+    "Bank Account Type",
+    "Bank Clearance",
+    "Bank Clearance Detail",
+    "Bank Guarantee",
+    "Bank Transaction",
+    "Bank Transaction Mapping",
+    "Bank Transaction Payments",
+    "Batch",
+    "Bin",
+    "Blanket Order",
+    "Blanket Order Item",
+    "Branch",
+    "Brand",
+    "Budget",
+    "Budget Account",
+    "Budget Distribution",
+    "Buying Settings",
+    "Campaign Item",
+    "Cashier Closing",
+    "Cashier Closing Payments",
+    "Chart of Accounts Importer",
+    "Cheque Print Template",
+    "Closed Document",
+    "Company",
+    "Competitor Detail",
+    "Cost Center",
+    "Cost Center Allocation",
+    "Cost Center Allocation Percentage",
+    "Coupon Code",
+    "Currency Exchange",
+    "Currency Exchange Settings",
+    "Currency Exchange Settings Details",
+    "Currency Exchange Settings Result",
+    "Customer",
+    "Customer Credit Limit",
+    "Customer Group",
+    "Customer Group Item",
+    "Customer Item",
+    "Customer Number At Supplier",
+    "Customs Tariff Number",
+    "Delivery Note",
+    "Delivery Note Item",
+    "Delivery Schedule Item",
+    "Delivery Settings",
+    "Delivery Stop",
+    "Delivery Trip",
+    "Department",
+    "Designation",
+    "Downtime Entry",
+    "Driver",
+    "Driving License Category",
+    "Email Digest",
+    "Email Digest Recipient",
+    "Employee",
+    "Employee Education",
+    "Employee External Work History",
+    "Employee Group",
+    "Employee Group Table",
+    "Employee Internal Work History",
+    "Exchange Rate Revaluation",
+    "Exchange Rate Revaluation Account",
+    "Finance Book",
+    "Fiscal Year",
+    "Fiscal Year Company",
+    "GL Entry",
+    "Global Defaults",
+    "Holiday",
+    "Holiday List",
+    "Import Supplier Invoice",
+    "Incoterm",
+    "Industry Type",
+    "Inventory Dimension",
+    "Item",
+    "Item Alternative",
+    "Item Attribute",
+    "Item Attribute Value",
+    "Item Barcode",
+    "Item Customer Detail",
+    "Item Default",
+    "Item Group",
+    "Item Lead Time",
+    "Item Manufacturer",
+    "Item Price",
+    "Item Quality Inspection Parameter",
+    "Item Reorder",
+    "Item Supplier",
+    "Item Tax",
+    "Item Tax Template",
+    "Item Tax Template Detail",
+    "Item Variant",
+    "Item Variant Attribute",
+    "Item Variant Settings",
+    "Item Website Specification",
+    "Item Wise Tax Detail",
+    "Job Card",
+    "Job Card Item",
+    "Job Card Operation",
+    "Job Card Scheduled Time",
+    "Job Card Secondary Item",
+    "Job Card Time Log",
+    "Journal Entry",
+    "Journal Entry Account",
+    "Journal Entry Template",
+    "Journal Entry Template Account",
+    "Landed Cost Item",
+    "Landed Cost Purchase Receipt",
+    "Landed Cost Taxes and Charges",
+    "Landed Cost Vendor Invoice",
+    "Landed Cost Voucher",
+    "Ledger Health",
+    "Ledger Health Monitor",
+    "Ledger Health Monitor Company",
+    "Ledger Merge",
+    "Ledger Merge Accounts",
+    "Lower Deduction Certificate",
+    "Manufacturer",
+    "Manufacturing Settings",
+    "Master Production Schedule",
+    "Master Production Schedule Item",
+    "Material Request",
+    "Material Request Item",
+    "Material Request Plan Item",
+    "Mode of Payment",
+    "Mode of Payment Account",
+    "Monthly Distribution",
+    "Monthly Distribution Percentage",
+    "Opening Invoice Creation Tool",
+    "Opening Invoice Creation Tool Item",
+    "Operation",
+    "Overdue Payment",
+    "Packed Item",
+    "Packing Slip",
+    "Packing Slip Item",
+    "Party Account",
+    "Party Link",
+    "Party Specific Item",
+    "Party Type",
+    "Payment Entry",
+    "Payment Entry Deduction",
+    "Payment Entry Reference",
+    "Payment Gateway Account",
+    "Payment Ledger Entry",
+    "Payment Order",
+    "Payment Order Reference",
+    "Payment Reconciliation",
+    "Payment Reconciliation Allocation",
+    "Payment Reconciliation Invoice",
+    "Payment Reconciliation Payment",
+    "Payment Reference",
+    "Payment Request",
+    "Payment Schedule",
+    "Payment Term",
+    "Payment Terms Template",
+    "Payment Terms Template Detail",
+    "Pegged Currencies",
+    "Pegged Currency Details",
+    "Period Closing Voucher",
+    "Pick List",
+    "Pick List Item",
+    "Plant Floor",
+    "Portal User",
+    "Price List",
+    "Price List Country",
+    "Pricing Rule",
+    "Pricing Rule Brand",
+    "Pricing Rule Detail",
+    "Pricing Rule Item Code",
+    "Pricing Rule Item Group",
+    "Process Deferred Accounting",
+    "Process Payment Reconciliation",
+    "Process Payment Reconciliation Log",
+    "Process Payment Reconciliation Log Allocations",
+    "Process Period Closing Voucher",
+    "Process Period Closing Voucher Detail",
+    "Product Bundle",
+    "Product Bundle Item",
+    "Production Plan",
+    "Production Plan Item",
+    "Production Plan Item Reference",
+    "Production Plan Material Request",
+    "Production Plan Material Request Warehouse",
+    "Production Plan Sales Order",
+    "Production Plan Sub Assembly Item",
+    "Promotional Scheme",
+    "Promotional Scheme Price Discount",
+    "Promotional Scheme Product Discount",
+    "Purchase Invoice",
+    "Purchase Invoice Advance",
+    "Purchase Invoice Item",
+    "Purchase Order",
+    "Purchase Order Item",
+    "Purchase Order Item Supplied",
+    "Purchase Receipt",
+    "Purchase Receipt Item",
+    "Purchase Receipt Item Supplied",
+    "Purchase Taxes and Charges",
+    "Purchase Taxes and Charges Template",
+    "Putaway Rule",
+    "Quality Inspection",
+    "Quality Inspection Parameter",
+    "Quality Inspection Parameter Group",
+    "Quality Inspection Reading",
+    "Quality Inspection Template",
+    "Quick Stock Balance",
+    "Quotation",
+    "Quotation Item",
+    "Quotation Lost Reason",
+    "Quotation Lost Reason Detail",
+    "Repost Accounting Ledger",
+    "Repost Accounting Ledger Items",
+    "Repost Allowed Types",
+    "Repost Item Valuation",
+    "Repost Payment Ledger",
+    "Repost Payment Ledger Items",
+    "Request for Quotation",
+    "Request for Quotation Item",
+    "Request for Quotation Supplier",
+    "Routing",
+    "Sales Forecast",
+    "Sales Forecast Item",
+    "Sales Invoice",
+    "Sales Invoice Advance",
+    "Sales Invoice Item",
+    "Sales Invoice Payment",
+    "Sales Invoice Reference",
+    "Sales Invoice Timesheet",
+    "Sales Order",
+    "Sales Order Item",
+    "Sales Partner",
+    "Sales Partner Item",
+    "Sales Partner Type",
+    "Sales Person",
+    "Sales Taxes and Charges",
+    "Sales Taxes and Charges Template",
+    "Sales Team",
+    "Selling Settings",
+    "Serial No",
+    "Serial and Batch Bundle",
+    "Serial and Batch Entry",
+    "Shipment",
+    "Shipment Delivery Note",
+    "Shipment Parcel",
+    "Shipment Parcel Template",
+    "Shipping Rule",
+    "Shipping Rule Condition",
+    "Shipping Rule Country",
+    "South Africa VAT Account",
+    "South Africa VAT Settings",
+    "Stock Closing Balance",
+    "Stock Closing Entry",
+    "Stock Entry",
+    "Stock Entry Detail",
+    "Stock Entry Type",
+    "Stock Ledger Entry",
+    "Stock Reconciliation",
+    "Stock Reconciliation Item",
+    "Stock Reposting Settings",
+    "Stock Reservation Entry",
+    "Stock Settings",
+    "Sub Operation",
+    "Subcontracting BOM",
+    "Subcontracting Inward Order",
+    "Subcontracting Inward Order Item",
+    "Subcontracting Inward Order Received Item",
+    "Subcontracting Inward Order Secondary Item",
+    "Subcontracting Inward Order Service Item",
+    "Subcontracting Order",
+    "Subcontracting Order Item",
+    "Subcontracting Order Service Item",
+    "Subcontracting Order Supplied Item",
+    "Subcontracting Receipt",
+    "Subcontracting Receipt Item",
+    "Subcontracting Receipt Supplied Item",
+    "Subscription Plan Detail",
+    "Supplier",
+    "Supplier Group",
+    "Supplier Group Item",
+    "Supplier Item",
+    "Supplier Number At Customer",
+    "Supplier Quotation",
+    "Supplier Quotation Item",
+    "Supplier Scorecard",
+    "Supplier Scorecard Criteria",
+    "Supplier Scorecard Period",
+    "Supplier Scorecard Scoring Criteria",
+    "Supplier Scorecard Scoring Standing",
+    "Supplier Scorecard Scoring Variable",
+    "Supplier Scorecard Standing",
+    "Supplier Scorecard Variable",
+    "Target Detail",
+    "Tax Category",
+    "Tax Rule",
+    "Tax Withholding Account",
+    "Tax Withholding Category",
+    "Tax Withholding Entry",
+    "Tax Withholding Group",
+    "Tax Withholding Rate",
+    "Terms and Conditions",
+    "Territory",
+    "Territory Item",
+    "Transaction Deletion Record",
+    "Transaction Deletion Record Details",
+    "Transaction Deletion Record Item",
+    "Transaction Deletion Record To Delete",
+    "UAE VAT Account",
+    "UAE VAT Settings",
+    "UOM",
+    "UOM Category",
+    "UOM Conversion Detail",
+    "UOM Conversion Factor",
+    "Unreconcile Payment",
+    "Unreconcile Payment Entries",
+    "Variant Field",
+    "Vehicle",
+    "Warehouse",
+    "Warehouse Type",
+    "Website Item Group",
+    "Work Order",
+    "Work Order Additional Item",
+    "Work Order Item",
+    "Work Order Operation",
+    "Workstation",
+    "Workstation Cost",
+    "Workstation Operating Component",
+    "Workstation Operating Component Account",
+    "Workstation Type",
+    "Workstation Working Hour"
+  ],
+  "removed_doctypes": [
+    "Activity Cost",
+    "Activity Type",
+    "Appointment",
+    "Appointment Booking Settings",
+    "Appointment Booking Slots",
+    "Asset",
+    "Asset Activity",
+    "Asset Capitalization",
+    "Asset Capitalization Asset Item",
+    "Asset Capitalization Service Item",
+    "Asset Capitalization Stock Item",
+    "Asset Category",
+    "Asset Category Account",
+    "Asset Depreciation Schedule",
+    "Asset Finance Book",
+    "Asset Maintenance",
+    "Asset Maintenance Log",
+    "Asset Maintenance Task",
+    "Asset Maintenance Team",
+    "Asset Movement",
+    "Asset Movement Item",
+    "Asset Repair",
+    "Asset Repair Consumed Item",
+    "Asset Repair Purchase Invoice",
+    "Asset Shift Allocation",
+    "Asset Shift Factor",
+    "Asset Value Adjustment",
+    "Availability Of Slots",
+    "Bank Reconciliation Tool",
+    "Bank Statement Import",
+    "Bank Statement Import Log",
+    "Bank Statement Import Log Column Map",
+    "Bank Transaction Rule",
+    "Bank Transaction Rule Accounts",
+    "Bank Transaction Rule Description Conditions",
+    "Bisect Accounting Statements",
+    "Bisect Nodes",
+    "Bulk Transaction Log",
+    "Bulk Transaction Log Detail",
+    "CRM Note",
+    "CRM Settings",
+    "Call Log",
+    "Campaign",
+    "Campaign Email Schedule",
+    "Code List",
+    "Common Code",
+    "Communication Medium",
+    "Communication Medium Timeslot",
+    "Competitor",
+    "Contract",
+    "Contract Fulfilment Checklist",
+    "Contract Template",
+    "Contract Template Fulfilment Terms",
+    "Dependent Task",
+    "Depreciation Schedule",
+    "Discounted Invoice",
+    "Dunning",
+    "Dunning Letter Text",
+    "Dunning Type",
+    "Email Campaign",
+    "Financial Report Row",
+    "Financial Report Template",
+    "Frappe CRM Allowed User",
+    "Incoming Call Handling Schedule",
+    "Incoming Call Settings",
+    "Installation Note",
+    "Installation Note Item",
+    "Invoice Discounting",
+    "Issue",
+    "Issue Priority",
+    "Issue Type",
+    "Lead",
+    "Linked Location",
+    "Location",
+    "Lost Reason Detail",
+    "Loyalty Point Entry",
+    "Loyalty Point Entry Redemption",
+    "Loyalty Program",
+    "Loyalty Program Collection",
+    "Maintenance Schedule",
+    "Maintenance Schedule Detail",
+    "Maintenance Schedule Item",
+    "Maintenance Team Member",
+    "Maintenance Visit",
+    "Maintenance Visit Purpose",
+    "Market Segment",
+    "Non Conformance",
+    "Opportunity",
+    "Opportunity Item",
+    "Opportunity Lost Reason",
+    "Opportunity Lost Reason Detail",
+    "Opportunity Type",
+    "POS Closing Entry",
+    "POS Closing Entry Detail",
+    "POS Closing Entry Taxes",
+    "POS Customer Group",
+    "POS Field",
+    "POS Invoice",
+    "POS Invoice Item",
+    "POS Invoice Merge Log",
+    "POS Invoice Reference",
+    "POS Item Group",
+    "POS Opening Entry",
+    "POS Opening Entry Detail",
+    "POS Payment Method",
+    "POS Profile",
+    "POS Profile User",
+    "POS Search Fields",
+    "POS Settings",
+    "PSOA Cost Center",
+    "PSOA Project",
+    "Pause SLA On Status",
+    "Plaid Settings",
+    "Process Statement Of Accounts",
+    "Process Statement Of Accounts CC",
+    "Process Statement Of Accounts Customer",
+    "Process Subscription",
+    "Project",
+    "Project Template",
+    "Project Template Task",
+    "Project Type",
+    "Project Update",
+    "Project User",
+    "Projects Settings",
+    "Prospect",
+    "Prospect Lead",
+    "Prospect Opportunity",
+    "Quality Action",
+    "Quality Action Resolution",
+    "Quality Feedback",
+    "Quality Feedback Parameter",
+    "Quality Feedback Template",
+    "Quality Feedback Template Parameter",
+    "Quality Goal",
+    "Quality Goal Objective",
+    "Quality Meeting",
+    "Quality Meeting Agenda",
+    "Quality Meeting Minutes",
+    "Quality Procedure",
+    "Quality Procedure Process",
+    "Quality Review",
+    "Quality Review Objective",
+    "Rename Tool",
+    "SLA Fulfilled On Status",
+    "SMS Center",
+    "Sales Stage",
+    "Service Day",
+    "Service Level Agreement",
+    "Service Level Priority",
+    "Share Balance",
+    "Share Transfer",
+    "Share Type",
+    "Shareholder",
+    "Subscription",
+    "Subscription Invoice",
+    "Subscription Plan",
+    "Subscription Settings",
+    "Support Search Source",
+    "Support Settings",
+    "Task",
+    "Task Depends On",
+    "Task Type",
+    "Telephony Call Type",
+    "Timesheet",
+    "Timesheet Detail",
+    "Video",
+    "Video Settings",
+    "Voice Call Settings",
+    "Warranty Claim",
+    "Website Attribute",
+    "Website Filter Field"
+  ],
+  "boundary_fields": {
+    "Work Order": [
+      "project"
+    ],
+    "Landed Cost Taxes and Charges": [
+      "project"
+    ],
+    "GL Entry": [
+      "project"
+    ],
+    "Purchase Receipt Item": [
+      "asset_category",
+      "asset_location",
+      "is_fixed_asset",
+      "project",
+      "wip_composite_asset"
+    ],
+    "BOM Creator": [
+      "project"
+    ],
+    "Stock Entry": [
+      "asset_repair",
+      "project"
+    ],
+    "Production Plan": [
+      "project"
+    ],
+    "Sales Order": [
+      "project"
+    ],
+    "Sales Invoice Item": [
+      "asset",
+      "enable_deferred_revenue",
+      "is_fixed_asset",
+      "pos_invoice",
+      "project"
+    ],
+    "Purchase Taxes and Charges": [
+      "project"
+    ],
+    "Material Request Item": [
+      "project",
+      "wip_composite_asset"
+    ],
+    "Budget": [
+      "project"
+    ],
+    "Payment Request": [
+      "project"
+    ],
+    "Request for Quotation": [
+      "opportunity"
+    ],
+    "Purchase Invoice Item": [
+      "asset_category",
+      "asset_location",
+      "enable_deferred_expense",
+      "is_fixed_asset",
+      "project",
+      "wip_composite_asset"
+    ],
+    "BOM": [
+      "project"
+    ],
+    "Quotation": [
+      "opportunity"
+    ],
+    "Purchase Receipt": [
+      "project"
+    ],
+    "Purchase Order": [
+      "project"
+    ],
+    "Subcontracting Order": [
+      "project"
+    ],
+    "Supplier Quotation Item": [
+      "project"
+    ],
+    "Delivery Note Item": [
+      "project"
+    ],
+    "Sales Invoice Timesheet": [
+      "activity_type",
+      "time_sheet"
+    ],
+    "Purchase Invoice": [
+      "project",
+      "subscription"
+    ],
+    "Request for Quotation Item": [
+      "project_name"
+    ],
+    "Sales Taxes and Charges": [
+      "project"
+    ],
+    "Supplier Quotation": [
+      "opportunity",
+      "project"
+    ],
+    "Subscription Plan Detail": [
+      "plan"
+    ],
+    "Subcontracting Receipt Item": [
+      "project"
+    ],
+    "Delivery Note": [
+      "project"
+    ],
+    "Bank Guarantee": [
+      "project"
+    ],
+    "Stock Entry Detail": [
+      "project"
+    ],
+    "Account Closing Balance": [
+      "project"
+    ],
+    "Purchase Order Item": [
+      "is_fixed_asset",
+      "project",
+      "wip_composite_asset"
+    ],
+    "Payment Entry Deduction": [
+      "dunning"
+    ],
+    "Customer": [
+      "lead_name",
+      "loyalty_program",
+      "market_segment",
+      "opportunity_name",
+      "prospect_name"
+    ],
+    "Landed Cost Item": [
+      "is_fixed_asset"
+    ],
+    "Shipping Rule": [
+      "project"
+    ],
+    "Opening Invoice Creation Tool": [
+      "project"
+    ],
+    "Job Card": [
+      "project"
+    ],
+    "Payment Entry": [
+      "project"
+    ],
+    "Advance Taxes and Charges": [
+      "project"
+    ],
+    "Subcontracting Order Item": [
+      "project"
+    ],
+    "Journal Entry Account": [
+      "project"
+    ],
+    "Sales Order Item": [
+      "project"
+    ],
+    "Subcontracting Receipt": [
+      "project"
+    ],
+    "Payment Reconciliation": [
+      "project"
+    ],
+    "Journal Entry Template Account": [
+      "project"
+    ],
+    "Item": [
+      "asset_category",
+      "enable_deferred_expense",
+      "enable_deferred_revenue",
+      "is_fixed_asset"
+    ],
+    "Stock Reservation Entry": [
+      "project"
+    ],
+    "Payment Ledger Entry": [
+      "project"
+    ],
+    "Serial No": [
+      "asset",
+      "location"
+    ],
+    "Stock Ledger Entry": [
+      "project"
+    ],
+    "Bank Transaction": [
+      "matched_transaction_rule"
+    ],
+    "Competitor Detail": [
+      "competitor"
+    ],
+    "Sales Invoice": [
+      "is_pos",
+      "loyalty_program",
+      "pos_closing_entry",
+      "pos_profile",
+      "project",
+      "subscription"
+    ],
+    "Opening Invoice Creation Tool Item": [
+      "project"
+    ]
+  },
+  "removed_imports": [
+    {
+      "file": "accounts\\utils.py",
+      "removed_import": "erpnext.accounts.doctype.dunning.dunning",
+      "names": [
+        "update_linked_dunnings"
+      ]
+    },
+    {
+      "file": "controllers\\selling_controller.py",
+      "removed_import": "erpnext.crm.doctype.lead.lead",
+      "names": [
+        "get_lead_details"
+      ]
+    },
+    {
+      "file": "controllers\\stock_controller.py",
+      "removed_import": "erpnext.projects.doctype.project.project",
+      "names": [
+        "update_consumed_material_cost"
+      ]
+    },
+    {
+      "file": "setup\\install.py",
+      "removed_import": "erpnext.crm.frappe_crm_api",
+      "names": [
+        "remove_allowed_users_on_crm_install"
+      ]
+    },
+    {
+      "file": "setup\\install.py",
+      "removed_import": "erpnext.crm.frappe_crm_api",
+      "names": [
+        "disable_frappe_crm_data_synchronization_on_crm_uninstall"
+      ]
+    },
+    {
+      "file": "stock\\get_item_details.py",
+      "removed_import": "erpnext.assets.doctype.asset.asset",
+      "names": [
+        "get_asset_account",
+        "is_cwip_accounting_enabled"
+      ]
+    },
+    {
+      "file": "stock\\get_item_details.py",
+      "removed_import": "erpnext.assets.doctype.asset_category.asset_category",
+      "names": [
+        "get_asset_category_account"
+      ]
+    },
+    {
+      "file": "templates\\pages\\order.py",
+      "removed_import": "erpnext.accounts.doctype.loyalty_program.loyalty_program",
+      "names": [
+        "get_loyalty_details"
+      ]
+    },
+    {
+      "file": "stock\\report\\stock_projected_qty\\stock_projected_qty.py",
+      "removed_import": "erpnext.accounts.doctype.pos_invoice.pos_invoice",
+      "names": [
+        "get_pos_reserved_qty"
+      ]
+    },
+    {
+      "file": "stock\\doctype\\item\\item.py",
+      "removed_import": "erpnext.assets.doctype.asset.asset",
+      "names": [
+        "get_asset_naming_series"
+      ]
+    },
+    {
+      "file": "stock\\doctype\\landed_cost_voucher\\landed_cost_voucher.py",
+      "removed_import": "erpnext.projects.doctype.project.project",
+      "names": [
+        "update_purchase_cost"
+      ]
+    },
+    {
+      "file": "stock\\doctype\\purchase_receipt\\purchase_receipt.py",
+      "removed_import": "erpnext.assets.doctype.asset.asset",
+      "names": [
+        "get_asset_account",
+        "is_cwip_accounting_enabled"
+      ]
+    },
+    {
+      "file": "stock\\doctype\\repost_item_valuation\\repost_item_valuation.py",
+      "removed_import": "erpnext.projects.doctype.project.project",
+      "names": [
+        "update_consumed_material_cost_for_vouchers"
+      ]
+    },
+    {
+      "file": "setup\\doctype\\company\\company.py",
+      "removed_import": "erpnext.accounts.doctype.financial_report_template.financial_report_template",
+      "names": [
+        "sync_financial_report_templates"
+      ]
+    },
+    {
+      "file": "selling\\page\\point_of_sale\\point_of_sale.py",
+      "removed_import": "erpnext.accounts.doctype.pos_invoice.pos_invoice",
+      "names": [
+        "get_item_group",
+        "get_stock_availability"
+      ]
+    },
+    {
+      "file": "selling\\page\\point_of_sale\\point_of_sale.py",
+      "removed_import": "erpnext.accounts.doctype.pos_profile.pos_profile",
+      "names": [
+        "get_child_nodes",
+        "get_item_groups"
+      ]
+    },
+    {
+      "file": "selling\\doctype\\customer\\customer.py",
+      "removed_import": "erpnext.crm.utils",
+      "names": [
+        "copy_comments",
+        "link_communications"
+      ]
+    },
+    {
+      "file": "selling\\doctype\\quotation\\quotation.py",
+      "removed_import": "erpnext.crm.doctype.lead.lead",
+      "names": [
+        "_make_customer"
+      ]
+    },
+    {
+      "file": "selling\\doctype\\quotation\\quotation.py",
+      "removed_import": "erpnext.crm.doctype.prospect.prospect",
+      "names": [
+        "make_customer"
+      ]
+    },
+    {
+      "file": "selling\\doctype\\quotation\\quotation.py",
+      "removed_import": "erpnext.crm.doctype.competitor_detail.competitor_detail",
+      "names": [
+        "CompetitorDetail"
+      ]
+    },
+    {
+      "file": "selling\\doctype\\quotation\\quotation.py",
+      "removed_import": "erpnext.crm.utils",
+      "names": [
+        "copy_comments",
+        "link_communications"
+      ]
+    },
+    {
+      "file": "manufacturing\\doctype\\workstation\\workstation.py",
+      "removed_import": "erpnext.support.doctype.issue.issue",
+      "names": [
+        "get_holidays"
+      ]
+    },
+    {
+      "file": "accounts\\report\\balance_sheet\\balance_sheet.py",
+      "removed_import": "erpnext.accounts.doctype.financial_report_template.financial_report_engine",
+      "names": [
+        "FinancialReportEngine",
+        "get_xlsx_styles"
+      ]
+    },
+    {
+      "file": "accounts\\report\\cash_flow\\cash_flow.py",
+      "removed_import": "erpnext.accounts.doctype.financial_report_template.financial_report_engine",
+      "names": [
+        "FinancialReportEngine",
+        "get_xlsx_styles"
+      ]
+    },
+    {
+      "file": "accounts\\report\\custom_financial_statement\\custom_financial_statement.py",
+      "removed_import": "erpnext.accounts.doctype.financial_report_template.financial_report_engine",
+      "names": [
+        "FinancialReportEngine",
+        "get_xlsx_styles"
+      ]
+    },
+    {
+      "file": "accounts\\report\\profit_and_loss_statement\\profit_and_loss_statement.py",
+      "removed_import": "erpnext.accounts.doctype.financial_report_template.financial_report_engine",
+      "names": [
+        "FinancialReportEngine",
+        "get_xlsx_styles"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\account_category\\account_category.py",
+      "removed_import": "erpnext.accounts.doctype.financial_report_template.financial_report_engine",
+      "names": [
+        "FormulaFieldUpdater"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\journal_entry\\journal_entry.py",
+      "removed_import": "erpnext.accounts.doctype.invoice_discounting.invoice_discounting",
+      "names": [
+        "get_party_account_based_on_invoice_discounting"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\journal_entry\\journal_entry.py",
+      "removed_import": "erpnext.assets.doctype.asset_depreciation_schedule.asset_depreciation_schedule",
+      "names": [
+        "get_depr_schedule"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\payment_entry\\payment_entry.py",
+      "removed_import": "erpnext.accounts.doctype.invoice_discounting.invoice_discounting",
+      "names": [
+        "get_party_account_based_on_invoice_discounting"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\payment_entry\\payment_entry.py",
+      "removed_import": "erpnext.accounts.doctype.dunning.dunning",
+      "names": [
+        "update_dunnings_linked_to_payment"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\payment_request\\payment_request.py",
+      "removed_import": "erpnext.accounts.doctype.subscription_plan.subscription_plan",
+      "names": [
+        "get_plan_rate"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\payment_request\\payment_request.py",
+      "removed_import": "erpnext.accounts.doctype.subscription_plan_detail.subscription_plan_detail",
+      "names": [
+        "SubscriptionPlanDetail"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\payment_request\\payment_request.py",
+      "removed_import": "erpnext.accounts.doctype.loyalty_program.loyalty_program",
+      "names": [
+        "validate_loyalty_points"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\purchase_invoice\\purchase_invoice.py",
+      "removed_import": "erpnext.assets.doctype.asset.asset",
+      "names": [
+        "is_cwip_accounting_enabled"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\purchase_invoice\\purchase_invoice.py",
+      "removed_import": "erpnext.assets.doctype.asset_category.asset_category",
+      "names": [
+        "get_asset_category_account"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\purchase_invoice\\purchase_invoice.py",
+      "removed_import": "erpnext.projects.doctype.project.project",
+      "names": [
+        "update_purchase_cost"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\sales_invoice\\sales_invoice.py",
+      "removed_import": "erpnext.accounts.doctype.dunning.dunning",
+      "names": [
+        "get_payment_schedule_outstanding"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\sales_invoice\\sales_invoice.py",
+      "removed_import": "erpnext.accounts.doctype.loyalty_program.loyalty_program",
+      "names": [
+        "get_loyalty_program_details_with_points",
+        "validate_loyalty_points"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\sales_invoice\\sales_invoice.py",
+      "removed_import": "erpnext.assets.doctype.asset.asset",
+      "names": [
+        "split_asset"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\sales_invoice\\sales_invoice.py",
+      "removed_import": "erpnext.assets.doctype.asset.depreciation",
+      "names": [
+        "depreciate_asset",
+        "get_asset_disposal_values",
+        "get_gl_entries_on_asset_disposal",
+        "get_gl_entries_on_asset_regain",
+        "reset_depreciation_schedule",
+        "reverse_depreciation_entry_made_on_disposal"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\sales_invoice\\sales_invoice.py",
+      "removed_import": "erpnext.assets.doctype.asset_activity.asset_activity",
+      "names": [
+        "add_asset_activity"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\sales_invoice\\sales_invoice.py",
+      "removed_import": "erpnext.projects.doctype.timesheet.timesheet",
+      "names": [
+        "get_projectwise_timesheet_data"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\sales_invoice\\sales_invoice.py",
+      "removed_import": "erpnext.accounts.doctype.loyalty_point_entry.loyalty_point_entry",
+      "names": [
+        "get_loyalty_point_entries",
+        "get_redemption_details"
+      ]
+    },
+    {
+      "file": "accounts\\doctype\\sales_invoice_item\\sales_invoice_item.py",
+      "removed_import": "erpnext.assets.doctype.asset.depreciation",
+      "names": [
+        "get_disposal_account_and_cost_center"
+      ]
+    }
+  ],
+  "moved_child_tables": {
+    "Competitor Detail": "原单据兼容子表；不包含原模块父单据或业务接口"
+  }
+}

@@ -1,0 +1,159 @@
+# Copyright (c) 2013, Frappe Technologies Pvt. Ltd. and contributors
+# For license information, please see license.txt
+
+import frappe
+from frappe import _
+from frappe.utils import cint, flt
+
+
+def execute(filters=None):
+    columns, data = [], []
+    columns = get_columns()
+    data = get_data(filters)
+    return columns, data
+
+
+def get_data(filters):
+    data = get_stock_ledger_entries(filters)
+    itewise_balance_qty = {}
+
+    for row in data:
+        key = (row.item_code, row.warehouse)
+        itewise_balance_qty.setdefault(key, []).append(row)
+
+    res = validate_data(itewise_balance_qty)
+    return res
+
+
+def validate_data(itewise_balance_qty):
+    res = []
+    precision = cint(frappe.db.get_default("float_precision")) or 2
+    reconciled_qty = get_reconciled_qty(itewise_balance_qty)
+    for _key, data in itewise_balance_qty.items():
+        row = get_incorrect_data(data, precision, reconciled_qty)
+        if row:
+            res.append(row)
+            res.append({})
+
+    return res
+
+
+def get_reconciled_qty(itewise_balance_qty):
+    names = [
+        row.voucher_detail_no
+        for data in itewise_balance_qty.values()
+        for row in data
+        if row.voucher_type == "Stock Reconciliation" and row.voucher_detail_no
+    ]
+    if not names:
+        return {}
+
+    return dict(
+        frappe.get_all(
+            "Stock Reconciliation Item",
+            filters={"name": ("in", names)},
+            fields=["name", "qty"],
+            as_list=True,
+        )
+    )
+
+
+def get_incorrect_data(data, precision, reconciled_qty):
+    balance_qty = 0.0
+    for row in data:
+        balance_qty += row.actual_qty
+        # the reset of an Adjustment Entry moves stock, it does not set a balance
+        if row.voucher_type == "Stock Reconciliation" and not row.batch_no and not row.is_adjustment_entry:
+            balance_qty = flt(row.qty_after_transaction)
+            if not row.actual_qty and row.voucher_detail_no in reconciled_qty:
+                balance_qty = flt(reconciled_qty[row.voucher_detail_no])
+
+        row.expected_balance_qty = balance_qty
+        difference = abs(flt(flt(row.expected_balance_qty) - flt(row.qty_after_transaction), precision))
+        if difference:
+            row.differnce = difference
+            return row
+
+
+def get_stock_ledger_entries(report_filters):
+    filters = {"is_cancelled": 0}
+    fields = [
+        "name",
+        "voucher_type",
+        "voucher_no",
+        "item_code",
+        "actual_qty",
+        "posting_date",
+        "posting_time",
+        "company",
+        "warehouse",
+        "qty_after_transaction",
+        "batch_no",
+        "is_adjustment_entry",
+        "voucher_detail_no",
+    ]
+
+    for field in ["warehouse", "item_code", "company"]:
+        if report_filters.get(field):
+            filters[field] = report_filters.get(field)
+
+    return frappe.get_all(
+        "Stock Ledger Entry",
+        fields=fields,
+        filters=filters,
+        order_by="posting_date asc, posting_time asc, creation asc",
+    )
+
+
+def get_columns():
+    return [
+        {
+            "label": _("Id"),
+            "fieldtype": "Link",
+            "fieldname": "name",
+            "options": "Stock Ledger Entry",
+            "width": 120,
+        },
+        {"label": _("Posting Date"), "fieldtype": "Date", "fieldname": "posting_date", "width": 110},
+        {
+            "label": _("Voucher Type"),
+            "fieldtype": "Link",
+            "fieldname": "voucher_type",
+            "options": "DocType",
+            "width": 120,
+        },
+        {
+            "label": _("Voucher No"),
+            "fieldtype": "Dynamic Link",
+            "fieldname": "voucher_no",
+            "options": "voucher_type",
+            "width": 120,
+        },
+        {
+            "label": _("Item Code"),
+            "fieldtype": "Link",
+            "fieldname": "item_code",
+            "options": "Item",
+            "width": 120,
+        },
+        {
+            "label": _("Warehouse"),
+            "fieldtype": "Link",
+            "fieldname": "warehouse",
+            "options": "Warehouse",
+            "width": 120,
+        },
+        {
+            "label": _("Expected Balance Qty"),
+            "fieldtype": "Float",
+            "fieldname": "expected_balance_qty",
+            "width": 170,
+        },
+        {
+            "label": _("Actual Balance Qty"),
+            "fieldtype": "Float",
+            "fieldname": "qty_after_transaction",
+            "width": 150,
+        },
+        {"label": _("Difference"), "fieldtype": "Float", "fieldname": "differnce", "width": 110},
+    ]

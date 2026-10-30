@@ -1,0 +1,55 @@
+{
+ "allow_roles": [
+  {
+   "role": "Purchase Manager"
+  },
+  {
+   "role": "Purchase User"
+  }
+ ],
+ "creation": "2026-02-19 10:53:58.761773",
+ "docstatus": 0,
+ "doctype": "Module Onboarding",
+ "idx": 0,
+ "is_complete": 0,
+ "modified": "2026-10-04 01:44:23.663365",
+ "modified_by": "Administrator",
+ "module": "Buying",
+ "name": "Buying Onboarding",
+ "owner": "Administrator",
+ "steps": [
+  {
+   "is_optional": 0,
+   "step": "Create Supplier"
+  },
+  {
+   "is_optional": 0,
+   "step": "Create Buying Item"
+  },
+  {
+   "is_optional": 1,
+   "step": "Create Supplier Quotation"
+  },
+  {
+   "is_optional": 1,
+   "step": "Create Purchase Order"
+  },
+  {
+   "is_optional": 0,
+   "step": "Create Purchase Invoice"
+  },
+  {
+   "is_optional": 0,
+   "step": "Pay Supplier"
+  },
+  {
+   "is_optional": 1,
+   "step": "View Accounts Payable"
+  },
+  {
+   "is_optional": 1,
+   "step": "View Purchase Order Analysis"
+  }
+ ],
+ "title": "Order from your suppliers"
+}

@@ -1,0 +1,125 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "allow_rename": 1,
+ "autoname": "field:template_name",
+ "creation": "2017-08-10 15:34:28.058054",
+ "description": "A set of payment terms to apply to invoices and orders.",
+ "doctype": "DocType",
+ "documentation": "https://docs.frappe.io/erpnext/user/manual/en/payment-terms-template",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "template_name",
+  "allocate_payment_based_on_payment_terms",
+  "terms"
+ ],
+ "fields": [
+  {
+   "fieldname": "template_name",
+   "fieldtype": "Data",
+   "label": "Template Name",
+   "unique": 1
+  },
+  {
+   "fieldname": "terms",
+   "fieldtype": "Table",
+   "label": "Payment Terms",
+   "options": "Payment Terms Template Detail",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "description": "If this checkbox is checked, paid amount will be splitted and allocated as per the amounts in payment schedule against each payment term",
+   "fieldname": "allocate_payment_based_on_payment_terms",
+   "fieldtype": "Check",
+   "label": "Allocate Payment Based On Payment Terms"
+  }
+ ],
+ "icon": "calendar-clock",
+ "links": [],
+ "modified": "2026-09-24 14:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Accounts",
+ "name": "Payment Terms Template",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts User",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "role": "HR Manager",
+   "select": 1
+  },
+  {
+   "read": 1,
+   "role": "Maintenance Manager"
+  },
+  {
+   "read": 1,
+   "role": "Maintenance User"
+  },
+  {
+   "read": 1,
+   "role": "Purchase Manager"
+  },
+  {
+   "role": "Purchase Master Manager",
+   "select": 1
+  },
+  {
+   "read": 1,
+   "role": "Purchase User"
+  },
+  {
+   "read": 1,
+   "role": "Sales Manager"
+  },
+  {
+   "role": "Sales Master Manager",
+   "select": 1
+  },
+  {
+   "read": 1,
+   "role": "Sales User"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

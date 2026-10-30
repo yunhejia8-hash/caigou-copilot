@@ -1,0 +1,69 @@
+# Copyright (c) 2020, Frappe Technologies Pvt. Ltd. and contributors
+# For license information, please see license.txt
+
+
+import frappe
+from frappe import _
+from frappe.model.document import Document
+from frappe.utils import get_datetime, get_link_to_form, time_diff_in_hours
+
+
+class DowntimeEntry(Document):
+    # begin: auto-generated types
+    # This code is auto-generated. Do not modify anything in this block.
+
+    from typing import TYPE_CHECKING
+
+    if TYPE_CHECKING:
+        from frappe.types import DF
+
+        downtime: DF.Float
+        from_time: DF.Datetime
+        naming_series: DF.Literal["DT-"]
+        operator: DF.Link
+        remarks: DF.Text | None
+        stop_reason: DF.Literal[
+            "",
+            "Excessive machine set up time",
+            "Unplanned machine maintenance",
+            "On-machine press checks",
+            "Machine operator errors",
+            "Machine malfunction",
+            "Electricity down",
+            "Other",
+        ]
+        to_time: DF.Datetime
+        workstation: DF.Link
+    # end: auto-generated types
+
+    def validate(self):
+        if self.from_time and self.to_time:
+            if get_datetime(self.to_time) <= get_datetime(self.from_time):
+                frappe.throw(_("To Time must be after From Time"))
+
+            self.downtime = time_diff_in_hours(self.to_time, self.from_time) * 60
+            self.validate_overlap()
+
+    def validate_overlap(self):
+        frappe.db.get_value("Workstation", self.workstation, "name", for_update=True)
+
+        entry = frappe.qb.DocType("Downtime Entry")
+        overlap = (
+            frappe.qb.from_(entry)
+            .select(entry.name)
+            .where(
+                (entry.workstation == self.workstation)
+                & (entry.name != self.name)
+                & (entry.from_time < self.to_time)
+                & (entry.to_time > self.from_time)
+            )
+            .limit(1)
+            .run(pluck=True)
+        )
+
+        if overlap:
+            frappe.throw(
+                _("Downtime overlaps with {0} for workstation {1}").format(
+                    get_link_to_form("Downtime Entry", overlap[0]), frappe.bold(self.workstation)
+                )
+            )

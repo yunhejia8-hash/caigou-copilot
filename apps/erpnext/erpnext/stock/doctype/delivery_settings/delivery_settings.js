@@ -1,0 +1,12 @@
+// Copyright (c) 2018, Frappe Technologies Pvt. Ltd. and contributors
+// For license information, please see license.txt
+
+frappe.ui.form.on("Delivery Settings", {
+	setup: function (frm) {
+		frm.set_query("dispatch_attachment", () => {
+			return {
+				filters: { doc_type: "Delivery Note" },
+			};
+		});
+	},
+});

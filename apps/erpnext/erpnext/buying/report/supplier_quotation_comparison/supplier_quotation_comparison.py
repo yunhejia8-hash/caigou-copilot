@@ -1,0 +1,327 @@
+# Copyright (c) 2013, Frappe Technologies Pvt. Ltd. and contributors
+# For license information, please see license.txt
+
+
+from collections import defaultdict
+
+import frappe
+from frappe import _
+from frappe.utils import cint, flt
+
+from erpnext.setup.utils import get_exchange_rate
+
+
+def execute(filters=None):
+    if not filters:
+        return [], []
+
+    validate_filters(filters)
+
+    columns = get_columns(filters)
+    supplier_quotation_data = get_data(filters)
+
+    data, chart_data = prepare_data(supplier_quotation_data, filters)
+    message = get_message()
+
+    return columns, data, message, chart_data
+
+
+def validate_filters(filters):
+    if not filters.get("categorize_by") and filters.get("group_by"):
+        filters["categorize_by"] = filters["group_by"]
+        filters["categorize_by"] = filters["categorize_by"].replace("Group by", "Categorize by")
+
+
+def get_data(filters):
+    sq = frappe.qb.DocType("Supplier Quotation")
+    sq_item = frappe.qb.DocType("Supplier Quotation Item")
+
+    query = (
+        frappe.get_query("Supplier Quotation", ignore_permissions=False)
+        .join(sq_item)
+        .on(sq_item.parent == sq.name)
+        .select(
+            sq_item.parent,
+            sq_item.item_code,
+            sq_item.qty,
+            sq.currency,
+            sq_item.stock_qty,
+            sq_item.amount,
+            sq_item.rate,
+            sq_item.conversion_factor,
+            sq_item.base_rate,
+            sq_item.base_amount,
+            sq.price_list_currency,
+            sq_item.uom,
+            sq_item.stock_uom,
+            sq_item.request_for_quotation,
+            sq_item.lead_time_days,
+            sq.supplier.as_("supplier_name"),
+            sq.valid_till,
+        )
+        .where(
+            (sq.company == filters.get("company"))
+            & (sq.transaction_date.between(filters.get("from_date"), filters.get("to_date")))
+        )
+        .orderby(sq.transaction_date, sq_item.item_code)
+    )
+
+    # blank -> Draft + Submitted, else filter to the chosen docstatus
+    if filters.get("status") == "Draft":
+        query = query.where(sq_item.docstatus == 0)
+    elif filters.get("status") == "Submitted":
+        query = query.where(sq_item.docstatus == 1)
+    else:
+        query = query.where(sq_item.docstatus < 2)
+
+    if filters.get("item_code"):
+        query = query.where(sq_item.item_code == filters.get("item_code"))
+
+    if filters.get("supplier_quotation"):
+        query = query.where(sq_item.parent.isin(filters.get("supplier_quotation")))
+
+    if filters.get("request_for_quotation"):
+        query = query.where(sq_item.request_for_quotation == filters.get("request_for_quotation"))
+
+    if filters.get("supplier"):
+        query = query.where(sq.supplier.isin(filters.get("supplier")))
+
+    if not filters.get("include_expired"):
+        query = query.where(sq.status != "Expired")
+
+    supplier_quotation_data = query.run(as_dict=True)
+
+    return supplier_quotation_data
+
+
+def prepare_data(supplier_quotation_data, filters):
+    out, groups, qty_list, suppliers, chart_data = [], [], [], [], []
+    group_wise_map = defaultdict(list)
+    supplier_qty_price_map = {}
+    rows_by_item = defaultdict(list)
+
+    group_by_field = (
+        "supplier_name" if filters.get("categorize_by") == "Categorize by Supplier" else "item_code"
+    )
+    float_precision = cint(frappe.db.get_default("float_precision")) or 2
+    company_currency = frappe.get_cached_value("Company", filters.get("company"), "default_currency")
+
+    for data in supplier_quotation_data:
+        group = data.get(group_by_field)  # get item or supplier value for this row
+
+        row = {
+            "item_code": ""
+            if group_by_field == "item_code"
+            else data.get("item_code"),  # leave blank if group by field
+            "supplier_name": "" if group_by_field == "supplier_name" else data.get("supplier_name"),
+            "quotation": data.get("parent"),
+            "qty": data.get("qty"),
+            "price": flt(data.get("amount"), float_precision),
+            "uom": data.get("uom"),
+            "price_list_currency": data.get("price_list_currency"),
+            "currency": data.get("currency"),
+            "company_currency": company_currency,
+            "stock_uom": data.get("stock_uom"),
+            "base_amount": flt(data.get("base_amount"), float_precision),
+            "base_rate": flt(data.get("base_rate"), float_precision),
+            "request_for_quotation": data.get("request_for_quotation"),
+            "valid_till": data.get("valid_till"),
+            "lead_time_days": data.get("lead_time_days"),
+        }
+        row["price_per_unit"] = get_price_per_stock_unit(row["price"], data.get("rate"), data)
+        row["base_price_per_unit"] = get_price_per_stock_unit(row["base_amount"], row["base_rate"], data)
+
+        # map for report view of form {'supplier1'/'item1':[{},{},...]}
+        group_wise_map[group].append(row)
+        rows_by_item[data.get("item_code")].append(row)
+
+        # map for chart preparation of the form {'supplier1': {'qty': 'price'}}
+        supplier = data.get("supplier_name")
+        if filters.get("item_code"):
+            qty_prices = supplier_qty_price_map.setdefault(supplier, {})
+            qty_prices[row["qty"]] = min(qty_prices.get(row["qty"], row["base_amount"]), row["base_amount"])
+
+        groups.append(group)
+        suppliers.append(supplier)
+        qty_list.append(data.get("qty"))
+
+    groups = list(set(groups))
+    suppliers = list(set(suppliers))
+    qty_list = list(set(qty_list))
+
+    if group_by_field == "item_code" or filters.get("item_code"):
+        flag_cheapest_quotes(rows_by_item)
+
+    # final data format for report view
+    for group in groups:
+        group_entries = group_wise_map[group]  # all entries pertaining to item/supplier
+        group_entries[0].update({group_by_field: group})  # Add item/supplier name in first group row
+        out.extend(group_entries)
+
+    if filters.get("item_code"):
+        # render chart only for one item comparison
+        chart_data = prepare_chart_data(suppliers, qty_list, supplier_qty_price_map, company_currency)
+
+    return out, chart_data
+
+
+def flag_cheapest_quotes(rows_by_item):
+    for rows in rows_by_item.values():
+        min_price = min(row["base_price_per_unit"] for row in rows)
+        for row in rows:
+            if row["base_price_per_unit"] == min_price:
+                row["min"] = 1
+
+
+def get_price_per_stock_unit(amount, rate, data):
+    if flt(data.get("stock_qty")):
+        return flt(amount) / flt(data.get("stock_qty"))
+    return flt(rate) / (flt(data.get("conversion_factor")) or 1)
+
+
+def prepare_chart_data(suppliers, qty_list, supplier_qty_price_map, company_currency):
+    data_points_map = {}
+    qty_list.sort()
+
+    # create qty wise values map of the form {'qty1':[value1, value2]}
+    for supplier in suppliers:
+        entry = supplier_qty_price_map[supplier]
+        for qty in qty_list:
+            if qty not in data_points_map:
+                data_points_map[qty] = []
+            if qty in entry:
+                data_points_map[qty].append(entry[qty])
+            else:
+                data_points_map[qty].append(None)
+
+    dataset = []
+    currency_symbol = frappe.db.get_value("Currency", company_currency, "symbol")
+    for qty in qty_list:
+        datapoints = {
+            "name": currency_symbol + " (Qty " + str(qty) + " )",
+            "values": data_points_map[qty],
+        }
+        dataset.append(datapoints)
+
+    chart_data = {"data": {"labels": suppliers, "datasets": dataset}, "type": "bar"}
+
+    return chart_data
+
+
+def get_columns(filters):
+    currency = frappe.get_cached_value("Company", filters.get("company"), "default_currency")
+
+    group_by_columns = [
+        {
+            "fieldname": "supplier_name",
+            "label": _("Supplier"),
+            "fieldtype": "Link",
+            "options": "Supplier",
+            "width": 150,
+        },
+        {
+            "fieldname": "item_code",
+            "label": _("Item"),
+            "fieldtype": "Link",
+            "options": "Item",
+            "width": 150,
+        },
+    ]
+
+    columns = [
+        {"fieldname": "uom", "label": _("UOM"), "fieldtype": "Link", "options": "UOM", "width": 90},
+        {"fieldname": "qty", "label": _("Quantity"), "fieldtype": "Float", "width": 80},
+        {
+            "fieldname": "stock_uom",
+            "label": _("Stock UOM"),
+            "fieldtype": "Link",
+            "options": "UOM",
+            "width": 90,
+        },
+        {
+            "fieldname": "currency",
+            "label": _("Currency"),
+            "fieldtype": "Link",
+            "options": "Currency",
+            "width": 110,
+        },
+        {
+            "fieldname": "price",
+            "label": _("Price"),
+            "fieldtype": "Currency",
+            "options": "currency",
+            "width": 110,
+        },
+        {
+            "fieldname": "price_per_unit",
+            "label": _("Price per Unit (Stock UOM)"),
+            "fieldtype": "Currency",
+            "options": "currency",
+            "width": 120,
+        },
+        {
+            "fieldname": "base_amount",
+            "label": _("Price ({0})").format(currency),
+            "fieldtype": "Currency",
+            "options": "company_currency",
+            "width": 180,
+        },
+        {
+            "fieldname": "base_rate",
+            "label": _("Price Per Unit ({0})").format(currency),
+            "fieldtype": "Currency",
+            "options": "company_currency",
+            "width": 180,
+        },
+        {
+            "fieldname": "quotation",
+            "label": _("Supplier Quotation"),
+            "fieldtype": "Link",
+            "options": "Supplier Quotation",
+            "width": 200,
+        },
+        {"fieldname": "valid_till", "label": _("Valid Till"), "fieldtype": "Date", "width": 100},
+        {
+            "fieldname": "lead_time_days",
+            "label": _("Lead Time (Days)"),
+            "fieldtype": "Int",
+            "width": 100,
+        },
+        {
+            "fieldname": "request_for_quotation",
+            "label": _("Request for Quotation"),
+            "fieldtype": "Link",
+            "options": "Request for Quotation",
+            "width": 150,
+        },
+    ]
+
+    if filters.get("categorize_by") == "Categorize by Item":
+        group_by_columns.reverse()
+
+    columns[0:0] = group_by_columns  # add positioned group by columns to the report
+    return columns
+
+
+def get_message():
+    return f"""<span class="indicator">
+        {_("Valid Till")}:&nbsp;&nbsp;
+        </span>
+        <span class="indicator orange">
+        {_("Expires in a week or less")}
+        </span>
+        &nbsp;&nbsp;
+        <span class="indicator red">
+        {_("Expires today or already expired")}
+        </span>"""
+
+
+@frappe.whitelist()
+def set_default_supplier(item_code: str, supplier: str, company: str):
+    frappe.has_permission("Item", "write", doc=item_code, throw=True)
+    frappe.db.set_value(
+        "Item Default",
+        {"parent": item_code, "company": company},
+        "default_supplier",
+        supplier,
+    )

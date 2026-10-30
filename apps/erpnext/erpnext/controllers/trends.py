@@ -1,0 +1,673 @@
+# Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
+# License: GNU General Public License v3. See license.txt
+
+
+import frappe
+from frappe import _
+from frappe.database.query import RawCriterion
+from frappe.desk.reportview import build_match_conditions
+from frappe.query_builder import Case
+from frappe.query_builder.functions import Coalesce, Sum
+from frappe.utils import DateTimeLikeObject, getdate, today
+from pypika.functions import Concat, NullIf
+
+import erpnext
+from erpnext.accounts.utils import get_fiscal_year
+
+
+def get_tables(trans):
+    # t1/t2 in the old raw SQL: the transaction and its item child table
+    return frappe.qb.DocType(trans), frappe.qb.DocType(f"{trans} Item")
+
+
+def get_columns(filters, trans):
+    validate_filters(filters)
+
+    # get conditions for based_on filter cond
+    based_on_details = based_wise_columns_query(filters.get("based_on"), trans)
+    # get conditions for periodic filter cond
+    period_cols, period_select = period_wise_columns_query(filters, trans)
+    # get conditions for grouping filter cond
+    group_by_cols = group_wise_column(filters.get("group_by"), trans)
+
+    columns = (
+        based_on_details["based_on_cols"]
+        + period_cols
+        + [_("Total(Qty)") + ":Float:120", _("Total(Amt)") + ":Currency/currency:120"]
+    )
+    if group_by_cols:
+        columns = (
+            based_on_details["based_on_cols"]
+            + group_by_cols
+            + period_cols
+            + [_("Total(Qty)") + ":Float:120", _("Total(Amt)") + ":Currency/currency:120"]
+        )
+
+    conditions = {
+        "based_on_select": based_on_details["based_on_select"],
+        "period_wise_select": period_select,
+        "columns": columns,
+        "group_by": based_on_details["based_on_group_by"],
+        "grbc": group_by_cols,
+        "trans": trans,
+        "joins": based_on_details["joins"],
+    }
+    conditions["company_currency"] = (
+        erpnext.get_company_currency(filters.get("company")) if filters.get("company") else None
+    )
+
+    return conditions
+
+
+def validate_filters(filters):
+    if not filters.get("fiscal_year"):
+        filters["fiscal_year"] = get_fiscal_year(today())[0]
+    if not filters.get("company"):
+        filters["company"] = frappe.defaults.get_user_default("Company")
+    for f in ["Fiscal Year", "Based On", "Period", "Company"]:
+        if not filters.get(f.lower().replace(" ", "_")):
+            frappe.throw(_("{0} is mandatory").format(_(f)))
+
+    if not frappe.db.exists("Fiscal Year", filters.get("fiscal_year")):
+        frappe.throw(_("Fiscal Year {0} Does Not Exist").format(filters.get("fiscal_year")))
+
+    if filters.get("based_on") == filters.get("group_by"):
+        frappe.throw(_("'Based On' and 'Group By' can not be same"))
+
+    if filters.get("period_based_on") and filters.period_based_on not in ["bill_date", "posting_date"]:
+        frappe.throw(
+            msg=_("{0} can be either {1} or {2}.").format(
+                frappe.bold("Period based On"), frappe.bold("Posting Date"), frappe.bold("Billing Date")
+            ),
+            title=_("Invalid Filter"),
+        )
+
+
+def get_item_codes(filters):
+    item_codes = filters.get("item_code") or []
+    if isinstance(item_codes, str):
+        item_codes = [item_codes]
+
+    return item_codes
+
+
+def get_trans_date(filters, trans, t1):
+    """The date column each transaction type buckets its periods on; Billing Date falls back to the posting date."""
+    if trans not in ["Sales Invoice", "Purchase Invoice", "Purchase Receipt", "Delivery Note"]:
+        return t1.transaction_date
+
+    if filters.period_based_on == "bill_date" and trans in ["Sales Invoice", "Purchase Invoice"]:
+        return Coalesce(t1.bill_date, t1.posting_date)
+
+    return t1.posting_date
+
+
+def get_conditions(filters, conditions, t1, t2):
+    """Criteria shared by every query the report issues, beyond company and period."""
+    criteria = [t1.docstatus == 1]
+
+    if not filters.get("include_closed_orders") and conditions.get("trans") in [
+        "Sales Order",
+        "Purchase Order",
+    ]:
+        criteria.append(t1.status != "Closed")
+
+    if filters.get("based_on") == "Project":
+        criteria.append(conditions["group_by"][0] != "")
+
+    permission_condition = get_permission_condition(conditions["trans"])
+    if permission_condition is not None:
+        criteria.append(permission_condition)
+
+    # filtering here instead of on the rendered columns keeps the total row in step with the rows
+    if item_codes := get_item_codes(filters):
+        criteria.append(t2.item_code.isin(item_codes))
+
+    return criteria
+
+
+def get_base_query(filters, conditions, t1, t2, year_start_date, year_end_date):
+    """Joins, company and period: the skeleton every trend query is built on."""
+    trans_date = get_trans_date(filters, conditions["trans"], t1)
+
+    query = frappe.qb.from_(t1).inner_join(t2).on(t2.parent == t1.name)
+    for table, criterion in conditions["joins"]:
+        query = query.inner_join(table).on(criterion)
+
+    query = query.where(t1.company == filters.get("company")).where(trans_date[year_start_date:year_end_date])
+    for criterion in get_conditions(filters, conditions, t1, t2):
+        query = query.where(criterion)
+
+    return query
+
+
+def get_data(filters, conditions):
+    data = []
+    inc = ""
+    t1, t2 = get_tables(conditions["trans"])
+
+    year_start_date, year_end_date = frappe.get_cached_value(
+        "Fiscal Year", filters.get("fiscal_year"), ["year_start_date", "year_end_date"]
+    )
+    base = get_base_query(filters, conditions, t1, t2, year_start_date, year_end_date)
+
+    # Lead/Prospect quotations have no customer group; label the empty based-on bucket for display only,
+    # keeping the raw key so the group_by detail queries still match it.
+    empty_group_label = (
+        _("No Customer Group")
+        if conditions.get("trans") == "Quotation" and filters.get("based_on") == "Customer Group"
+        else None
+    )
+
+    if filters.get("group_by"):
+        sel_col = None
+        ind = conditions["columns"].index(conditions["grbc"][0])
+
+        if filters.get("group_by") == "Item":
+            sel_col = t2.item_code
+        elif filters.get("group_by") == "Customer":
+            # A Quotation's party spans Customer/Lead/Prospect, so key the breakdown by type and party
+            # (as based_on Customer does); otherwise same-named parties of different types would merge.
+            if conditions.get("trans") == "Quotation":
+                sel_col = Concat(t1.quotation_to, ": ", t1.party_name)
+            else:
+                sel_col = t1.customer
+        elif filters.get("group_by") == "Supplier":
+            sel_col = t1.supplier
+
+        # first column of the multi-column group_by = the based-on key the detail queries equate against
+        based_on_key = conditions["group_by"][0]
+
+        if filters.get("based_on") in ["Customer", "Supplier"]:
+            inc = 3
+        elif filters.get("based_on") in ["Item"]:
+            inc = 2
+        else:
+            inc = 1
+
+        data1 = (
+            base.select(*conditions["based_on_select"], *conditions["period_wise_select"])
+            .groupby(*conditions["group_by"])
+            .run(as_list=1)
+        )
+
+        for d in range(len(data1)):
+            # to add blanck column
+            dt = data1[d]
+            dt.insert(ind, "")
+            data.append(dt)
+
+            # to get distinct value of col specified by group_by in filter
+            row = base.select(sel_col).distinct().where(based_on_key == data1[d][0]).run(as_list=1)
+
+            for i in range(len(row)):
+                des = ["" for q in range(len(conditions["columns"]))]
+
+                # get data for group_by filter
+                company = frappe.qb.DocType("Company")
+                row1 = (
+                    base.select(company.default_currency, sel_col, *conditions["period_wise_select"])
+                    .where(sel_col == row[i][0])
+                    .where(based_on_key == data1[d][0])
+                    .groupby(company.default_currency, sel_col)
+                    .run(as_list=1)
+                )
+
+                des[ind] = row[i][0]
+                des[ind - 1] = row1[0][0]
+
+                for j in range(1, len(conditions["columns"]) - inc):
+                    des[j + inc] = row1[0][j]
+
+                data.append(des)
+
+            # relabel only after the detail queries have matched on the raw key
+            if empty_group_label and not dt[0]:
+                dt[0] = empty_group_label
+
+        total_row = calculate_total_row(data1, conditions["columns"], conditions.get("company_currency"))
+        data.append(total_row)
+    else:
+        data = (
+            base.select(*conditions["based_on_select"], *conditions["period_wise_select"])
+            .groupby(*conditions["group_by"])
+            .run(as_list=1)
+        )
+
+        if empty_group_label:
+            for row in data:
+                if not row[0]:
+                    row[0] = empty_group_label
+
+        total_row = calculate_total_row(data, conditions["columns"], conditions.get("company_currency"))
+        data.append(total_row)
+
+    return data
+
+
+def get_permission_condition(doctype):
+    if match_conditions := build_match_conditions(doctype):
+        table = frappe.qb.DocType(doctype)
+        permitted_documents = frappe.qb.from_(table).select(table.name).where(RawCriterion(match_conditions))
+        return table.name.isin(permitted_documents)
+
+
+def calculate_total_row(data, columns, company_currency=None):
+    def wrap_in_quotes(label):
+        return f"'{label}'"
+
+    total_values = {}
+    currency_col_idx = None
+    for i, col in enumerate(columns):
+        # based-on and group-by columns are dicts, periodic and total columns are strings
+        if isinstance(col, dict):
+            if col.get("fieldtype") == "Link" and col.get("options") == "Currency":
+                currency_col_idx = i
+        elif "Float" in col or "Currency/currency" in col:
+            total_values[i] = 0
+
+    for row in data:
+        for i in total_values.keys():
+            total_values[i] += row[i] if row[i] is not None else 0
+
+    total_row = [wrap_in_quotes(_("Total"))]
+    for i in range(1, len(columns)):
+        total_row.append(total_values.get(i, None))
+
+    if currency_col_idx is not None:
+        total_row[currency_col_idx] = company_currency
+
+    return total_row
+
+
+def get_mon(dt):
+    return getdate(dt).strftime("%b")
+
+
+def period_wise_columns_query(filters, trans):
+    t1, t2 = get_tables(trans)
+    trans_date = get_trans_date(filters, trans, t1)
+
+    pwc, period_select = [], []
+    bet_dates = get_period_date_ranges(filters.get("period"), filters.get("fiscal_year"))
+
+    if filters.get("period") != "Yearly":
+        for dt in bet_dates:
+            get_period_wise_columns(dt, filters.get("period"), pwc)
+            period_select += get_period_wise_terms(dt, trans_date, t2)
+    else:
+        pwc = [
+            _(filters.get("fiscal_year")) + " (" + _("Qty") + "):Float:120",
+            _(filters.get("fiscal_year")) + " (" + _("Amt") + "):Currency/currency:120",
+        ]
+        period_select = [Sum(t2.stock_qty), Sum(t2.base_net_amount)]
+
+    # the trailing pair is the Total(Qty)/Total(Amt) column of every trend report
+    period_select += [Sum(t2.stock_qty), Sum(t2.base_net_amount)]
+
+    return pwc, period_select
+
+
+def get_period_wise_columns(bet_dates, period, pwc):
+    if period == "Monthly":
+        pwc += [
+            _(get_mon(bet_dates[0])) + " (" + _("Qty") + "):Float:120",
+            _(get_mon(bet_dates[0])) + " (" + _("Amt") + "):Currency/currency:120",
+        ]
+    else:
+        pwc += [
+            _(get_mon(bet_dates[0])) + "-" + _(get_mon(bet_dates[1])) + " (" + _("Qty") + "):Float:120",
+            _(get_mon(bet_dates[0]))
+            + "-"
+            + _(get_mon(bet_dates[1]))
+            + " ("
+            + _("Amt")
+            + "):Currency/currency:120",
+        ]
+
+
+def get_period_wise_terms(bet_dates, trans_date, t2):
+    # a CASE with no ELSE yields NULL outside the period, so empty buckets stay blank
+    in_period = trans_date[bet_dates[0] : bet_dates[1]]
+
+    return [
+        Sum(Case().when(in_period, t2.stock_qty)),
+        Sum(Case().when(in_period, t2.base_net_amount)),
+    ]
+
+
+@frappe.whitelist(allow_guest=True)
+def get_period_date_ranges(period, fiscal_year=None, year_start_date=None):
+    from dateutil.relativedelta import relativedelta
+
+    if not year_start_date:
+        year_start_date, year_end_date = frappe.get_cached_value(
+            "Fiscal Year", fiscal_year, ["year_start_date", "year_end_date"]
+        )
+
+    increment = {"Monthly": 1, "Quarterly": 3, "Half-Yearly": 6, "Yearly": 12}.get(period)
+
+    period_date_ranges = []
+    for _i in range(1, 13, increment):
+        period_end_date = getdate(year_start_date) + relativedelta(months=increment, days=-1)
+        if period_end_date > getdate(year_end_date):
+            period_end_date = year_end_date
+        period_date_ranges.append([year_start_date, period_end_date])
+        year_start_date = period_end_date + relativedelta(days=1)
+        if period_end_date == year_end_date:
+            break
+
+    return period_date_ranges
+
+
+def get_period_month_ranges(period, fiscal_year):
+    from dateutil.relativedelta import relativedelta
+
+    period_month_ranges = []
+
+    for start_date, end_date in get_period_date_ranges(period, fiscal_year):
+        months_in_this_period = []
+        while start_date <= end_date:
+            months_in_this_period.append(start_date.strftime("%B"))
+            start_date += relativedelta(months=1)
+        period_month_ranges.append(months_in_this_period)
+
+    return period_month_ranges
+
+
+def quotation_party_name_expr(t1):
+    """Resolve a Quotation's party label from its dynamic link, mirroring set_customer_name()."""
+    customer = frappe.qb.DocType("Customer")
+    lead = frappe.qb.DocType("Lead")
+
+    expr = (
+        Case()
+        .when(
+            t1.quotation_to == "Customer",
+            frappe.qb.from_(customer).select(customer.customer_name).where(customer.name == t1.party_name),
+        )
+        .when(
+            t1.quotation_to == "Lead",
+            frappe.qb.from_(lead)
+            .select(Coalesce(NullIf(lead.company_name, ""), lead.lead_name))
+            .where(lead.name == t1.party_name),
+        )
+        .when(t1.quotation_to == "Prospect", t1.party_name)
+    )
+
+    # CRM Deal ships with the CRM app; skip the branch when its table is absent
+    if frappe.db.table_exists("CRM Deal"):
+        deal = frappe.qb.DocType("CRM Deal")
+        expr = expr.when(
+            t1.quotation_to == "CRM Deal",
+            frappe.qb.from_(deal).select(deal.organization).where(deal.name == t1.party_name),
+        )
+
+    return expr
+
+
+def quotation_territory_expr(t1):
+    """Territory from the party master. CRM Deal has none here: it ships with the CRM app."""
+    customer = frappe.qb.DocType("Customer")
+    lead = frappe.qb.DocType("Lead")
+    prospect = frappe.qb.DocType("Prospect")
+
+    return (
+        Case()
+        .when(
+            t1.quotation_to == "Customer",
+            frappe.qb.from_(customer).select(customer.territory).where(customer.name == t1.party_name),
+        )
+        .when(
+            t1.quotation_to == "Lead",
+            frappe.qb.from_(lead).select(lead.territory).where(lead.name == t1.party_name),
+        )
+        .when(
+            t1.quotation_to == "Prospect",
+            frappe.qb.from_(prospect).select(prospect.territory).where(prospect.name == t1.party_name),
+        )
+    )
+
+
+def based_wise_columns_query(based_on, trans):
+    t1, t2 = get_tables(trans)
+    based_on_details = {"joins": []}
+
+    # based_on_cols, based_on_select, based_on_group_by, joins
+    if based_on == "Item":
+        item_master = frappe.qb.DocType("Item")
+        based_on_details["based_on_cols"] = [
+            {"label": _("Item"), "fieldtype": "Link", "options": "Item", "width": 120, "fieldname": "item"},
+            {"label": _("Item Name"), "fieldtype": "Data", "width": 120, "fieldname": "item_name"},
+        ]
+        # item_name is stored per line and editable, so it is not functionally dependent on item_code
+        # and Max() over it is a sort -- which MariaDB and PostgreSQL resolve differently. Read it
+        # from the Item master instead: that IS functionally dependent on the grouped item_code, so
+        # it can be grouped without splitting rows and is identical on both engines by construction.
+        based_on_details["based_on_select"] = [t2.item_code, item_master.item_name.as_("item_name")]
+        based_on_details["based_on_group_by"] = [t2.item_code, item_master.item_name]
+        based_on_details["joins"] = [(item_master, t2.item_code == item_master.name)]
+
+    elif based_on == "Item Group":
+        based_on_details["based_on_cols"] = [
+            {
+                "label": _("Item Group"),
+                "fieldtype": "Link",
+                "options": "Item Group",
+                "width": 120,
+                "fieldname": "item_group",
+            }
+        ]
+        based_on_details["based_on_select"] = [t2.item_group]
+        based_on_details["based_on_group_by"] = [t2.item_group]
+
+    elif based_on == "Customer":
+        if trans == "Quotation":
+            based_on_details["based_on_cols"] = [
+                {
+                    "label": _("Party"),
+                    "fieldtype": "Link",
+                    "options": "Customer",
+                    "width": 120,
+                    "fieldname": "party",
+                },
+                {"label": _("Party Name"), "fieldtype": "Data", "width": 120, "fieldname": "party_name"},
+                {
+                    "label": _("Territory"),
+                    "fieldtype": "Link",
+                    "options": "Territory",
+                    "width": 120,
+                    "fieldname": "territory",
+                },
+            ]
+            # a Quotation's party_name is a dynamic link, so no single master can be joined. Resolve
+            # it through the quotation_to discriminator, mirroring Quotation.set_customer_name, and
+            # group by it too: two parties of different types can share a name, and merging them
+            # under one row was never right. Correlated only on grouped columns, so the query stays
+            # valid under GROUP BY and free of any text sort.
+            based_on_details["based_on_select"] = [
+                t1.party_name,
+                quotation_party_name_expr(t1).as_("customer_name"),
+                quotation_territory_expr(t1).as_("territory"),
+            ]
+            based_on_details["based_on_group_by"] = [t1.party_name, t1.quotation_to]
+        else:
+            customer_master = frappe.qb.DocType("Customer")
+            based_on_details["based_on_cols"] = [
+                {
+                    "label": _("Customer"),
+                    "fieldtype": "Link",
+                    "options": "Customer",
+                    "width": 120,
+                    "fieldname": "customer",
+                },
+                {
+                    "label": _("Customer Name"),
+                    "fieldtype": "Data",
+                    "width": 120,
+                    "fieldname": "customer_name",
+                },
+                {
+                    "label": _("Territory"),
+                    "fieldtype": "Link",
+                    "options": "Territory",
+                    "width": 120,
+                    "fieldname": "territory",
+                },
+            ]
+            # customer_name and territory are stored per transaction and editable, so they are not
+            # functionally dependent on the customer and Max() over them is a text sort, which the
+            # engines resolve differently. The Customer master's values ARE dependent on the grouped
+            # key, so they can be grouped without splitting rows and agree on both engines.
+            based_on_details["based_on_select"] = [
+                t1.customer,
+                customer_master.customer_name.as_("customer_name"),
+                customer_master.territory.as_("territory"),
+            ]
+            based_on_details["based_on_group_by"] = [
+                t1.customer,
+                customer_master.customer_name,
+                customer_master.territory,
+            ]
+            based_on_details["joins"] = [(customer_master, t1.customer == customer_master.name)]
+
+    elif based_on == "Customer Group":
+        customer_group = t1.customer_group
+        customer_group_col = {
+            "label": _("Customer Group"),
+            "fieldtype": "Link",
+            "options": "Customer Group",
+            "fieldname": "customer_group",
+        }
+        # A Quotation to a Lead/Prospect has no customer group (NULL or ''); fold both into one key so
+        # the group_by detail queries still match it (labelled for display in get_data). Render it as
+        # plain text since the bucket is not a real Customer Group record.
+        if trans == "Quotation":
+            customer_group = Coalesce(t1.customer_group, "")
+            customer_group_col = {
+                "label": _("Customer Group"),
+                "fieldtype": "Data",
+                "fieldname": "customer_group",
+            }
+        based_on_details["based_on_cols"] = [customer_group_col]
+        based_on_details["based_on_select"] = [customer_group]
+        based_on_details["based_on_group_by"] = [customer_group]
+
+    elif based_on == "Supplier":
+        supplier_master = frappe.qb.DocType("Supplier")
+        based_on_details["based_on_cols"] = [
+            {
+                "label": _("Supplier"),
+                "fieldtype": "Link",
+                "options": "Supplier",
+                "width": 120,
+                "fieldname": "supplier",
+            },
+            {"label": _("Supplier Name"), "fieldtype": "Data", "width": 120, "fieldname": "supplier_name"},
+            {
+                "label": _("Supplier Group"),
+                "fieldtype": "Link",
+                "options": "Supplier Group",
+                "width": 140,
+                "fieldname": "supplier_group",
+            },
+        ]
+        # supplier_name is stored per transaction and editable, so Max() over it is a text sort that
+        # the engines resolve differently. The Supplier master is joined here anyway and its columns
+        # are functionally dependent on the grouped supplier, so both can simply be grouped: no row
+        # split, and identical on both engines by construction.
+        based_on_details["based_on_select"] = [
+            t1.supplier,
+            supplier_master.supplier_name,
+            supplier_master.supplier_group,
+        ]
+        based_on_details["based_on_group_by"] = [
+            t1.supplier,
+            supplier_master.supplier_name,
+            supplier_master.supplier_group,
+        ]
+        based_on_details["joins"] = [(supplier_master, t1.supplier == supplier_master.name)]
+
+    elif based_on == "Supplier Group":
+        supplier_master = frappe.qb.DocType("Supplier")
+        based_on_details["based_on_cols"] = [
+            {
+                "label": _("Supplier Group"),
+                "fieldtype": "Link",
+                "options": "Supplier Group",
+                "width": 140,
+                "fieldname": "supplier_group",
+            }
+        ]
+        based_on_details["based_on_select"] = [supplier_master.supplier_group]
+        based_on_details["based_on_group_by"] = [supplier_master.supplier_group]
+        based_on_details["joins"] = [(supplier_master, t1.supplier == supplier_master.name)]
+
+    elif based_on == "Territory":
+        based_on_details["based_on_cols"] = [
+            {
+                "label": _("Territory"),
+                "fieldtype": "Link",
+                "options": "Territory",
+                "width": 120,
+                "fieldname": "territory",
+            }
+        ]
+        based_on_details["based_on_select"] = [t1.territory]
+        based_on_details["based_on_group_by"] = [t1.territory]
+
+    elif based_on == "Project":
+        if trans in ["Sales Invoice", "Delivery Note", "Sales Order"]:
+            project = t1.project
+        elif trans in ["Purchase Order", "Purchase Invoice", "Purchase Receipt"]:
+            project = t2.project
+        else:
+            frappe.throw(_("Project-wise data is not available for Quotation"))
+
+        based_on_details["based_on_cols"] = [
+            {
+                "label": _("Project"),
+                "fieldtype": "Link",
+                "options": "Project",
+                "width": 120,
+                "fieldname": "project",
+            }
+        ]
+        based_on_details["based_on_select"] = [project]
+        based_on_details["based_on_group_by"] = [project]
+
+    company = frappe.qb.DocType("Company")
+    based_on_details["based_on_select"].append(company.default_currency.as_("currency"))
+    based_on_details["based_on_group_by"].append(company.default_currency)
+    based_on_details["based_on_cols"].append(
+        {
+            "label": _("Currency"),
+            "fieldtype": "Link",
+            "options": "Currency",
+            "width": 120,
+            "fieldname": "currency",
+        }
+    )
+    based_on_details["joins"].append((company, t1.company == company.name))
+
+    return based_on_details
+
+
+def group_wise_column(group_by, trans=None):
+    if not group_by:
+        return []
+
+    # A Quotation's customer breakdown spans Customer/Lead/Prospect parties, so it can't link to a
+    # single master; show the party as plain data under a neutral label.
+    if trans == "Quotation" and group_by == "Customer":
+        return [{"label": _("Party"), "fieldtype": "Data", "width": 120, "fieldname": "party"}]
+
+    return [
+        {
+            "label": _(group_by),
+            "fieldtype": "Link",
+            "options": group_by,
+            "width": 120,
+            "fieldname": frappe.scrub(group_by),
+        }
+    ]

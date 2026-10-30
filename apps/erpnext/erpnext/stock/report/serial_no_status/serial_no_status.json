@@ -1,0 +1,33 @@
+{
+ "add_total_row": 0,
+ "columns": [],
+ "creation": "2013-01-14 10:52:58",
+ "disabled": 0,
+ "docstatus": 0,
+ "doctype": "Report",
+ "filters": [],
+ "idx": 4,
+ "is_standard": "Yes",
+ "json": "{\"fields\": [[\"name\", \"Serial No\"], [\"serial_no\", \"Serial No\"], [\"item_code\", \"Serial No\"], [\"status\", \"Serial No\"], [\"warehouse\", \"Serial No\"], [\"item_name\", \"Serial No\"], [\"description\", \"Serial No\"], [\"item_group\", \"Serial No\"], [\"brand\", \"Serial No\"], [\"reference_name\", \"Serial No\"], [\"reference_doctype\", \"Serial No\"], [\"customer\", \"Serial No\"]], \"filters\": [], \"order_by\": \"`tabSerial No`.`serial_no` desc\", \"add_totals_row\": 0}",
+ "letterhead": null,
+ "modified": "2026-10-16 13:10:37.307111",
+ "modified_by": "Administrator",
+ "module": "Stock",
+ "name": "Serial No Status",
+ "owner": "Administrator",
+ "prepared_report": 0,
+ "ref_doctype": "Serial No",
+ "report_name": "Serial No Status",
+ "report_type": "Report Builder",
+ "roles": [
+  {
+   "role": "Item Manager"
+  },
+  {
+   "role": "Stock Manager"
+  },
+  {
+   "role": "Stock User"
+  }
+ ]
+}

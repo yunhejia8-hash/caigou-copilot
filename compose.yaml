@@ -1,0 +1,78 @@
+name: caigou-focus
+x-app: &app
+  image: caigou-copilot:focus
+  build: .
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+  environment: &environment
+    SITE_NAME: focus.local
+    ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+    ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+    ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+
+services:
+  db:
+    image: mariadb:11.8
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_PASSWORD:?先生成本地 .env}
+    command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci, --skip-character-set-client-handshake, --innodb-snapshot-isolation=OFF]
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  redis-cache:
+    image: redis:6.2-alpine
+  redis-queue:
+    image: redis:6.2-alpine
+    volumes:
+      - redis-data:/data
+  initialize:
+    <<: *app
+    command: [python, /home/frappe/initialize_focus.py]
+    environment:
+      <<: *environment
+      DB_PASSWORD: ${DB_PASSWORD:?先生成本地 .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?先生成本地 .env}
+    depends_on:
+      db: {condition: service_healthy}
+      redis-cache: {condition: service_started}
+      redis-queue: {condition: service_started}
+  backend:
+    <<: *app
+    depends_on:
+      initialize: {condition: service_completed_successfully}
+  frontend:
+    <<: *app
+    command: [nginx-entrypoint.sh]
+    ports: ["127.0.0.1:${HTTP_PORT:-8081}:8080"]
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: focus.local
+      SOCKETIO: websocket:9000
+      PROXY_READ_TIMEOUT: "180"
+    depends_on: [backend, websocket]
+  websocket:
+    <<: *app
+    command: [node, /home/frappe/frappe-bench/apps/frappe/socketio.js]
+    depends_on:
+      initialize: {condition: service_completed_successfully}
+  worker:
+    <<: *app
+    command: [bench, worker, --queue, "long,default,short"]
+    depends_on:
+      initialize: {condition: service_completed_successfully}
+  scheduler:
+    <<: *app
+    command: [bench, schedule]
+    depends_on:
+      initialize: {condition: service_completed_successfully}
+
+volumes:
+  sites:
+  logs:
+  db-data:
+  redis-data:

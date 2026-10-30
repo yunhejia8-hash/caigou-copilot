@@ -1,0 +1,56 @@
+{
+ "allow_roles": [
+  {
+   "role": "System Manager"
+  }
+ ],
+ "creation": "2026-02-24 18:03:53.158438",
+ "docstatus": 0,
+ "doctype": "Module Onboarding",
+ "idx": 0,
+ "is_complete": 0,
+ "modified": "2026-10-04 03:16:15.381887",
+ "modified_by": "Administrator",
+ "module": "Setup",
+ "name": "Organization Onboarding",
+ "owner": "Administrator",
+ "steps": [
+  {
+   "is_optional": 0,
+   "step": "Invite Users"
+  },
+  {
+   "is_optional": 0,
+   "step": "Complete Accounting Onboarding"
+  },
+  {
+   "is_optional": 0,
+   "step": "Complete Selling Onboarding"
+  },
+  {
+   "is_optional": 0,
+   "step": "Complete Buying Onboarding"
+  },
+  {
+   "is_optional": 0,
+   "step": "Complete Stock Onboarding"
+  },
+  {
+   "is_optional": 0,
+   "step": "Complete Manufacturing Onboarding"
+  },
+  {
+   "is_optional": 0,
+   "step": "Complete Projects Onboarding"
+  },
+  {
+   "is_optional": 0,
+   "step": "Complete Asset Onboarding"
+  },
+  {
+   "is_optional": 0,
+   "step": "Complete Quality Onboarding"
+  }
+ ],
+ "title": "Get to know ERPNext"
+}
