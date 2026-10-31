@@ -122,7 +122,7 @@ frappe.ProcurementWorkspace = class {
             const process=this.process,stage=this.stage;
             const r=await this.call('knowledge',{process,stage});
             if(process!==this.process||stage!==this.stage)return;
-            this.host.find('.pw-knowledge').html([...r.rules,...r.experiences].map(k=>`<div class="pw-record"><b>${this.esc(k.title||k.name)}${k.version?' · v'+this.esc(k.version):''}</b>${k.legacy?`<p>历史判断原文：${this.esc(k.source_excerpt)}${k.excerpt_truncated?'（已截断，完整内容请查看来源）':''}</p>`:''}<p>${this.esc(k.recommendation)}</p><small>条件：${this.esc(this.conditions(k.conditions))}</small>${this.sources(k.sources)}</div>`).join('')||`<p>${this.esc(r.note||'暂无适用的已核实经验')}</p>`); return;
+            this.host.find('.pw-knowledge').html(`<p>${this.esc(r.note||'历史参考须核对适用条件')}</p>`+[...r.rules,...r.experiences].map(k=>`<div class="pw-record"><b>${this.esc(k.title||k.name)}${k.version?' · v'+this.esc(k.version):''}</b>${k.outcome==='negative'?'<p class="pw-warning">历史反例，不宜照搬</p>':''}${k.legacy?`<p>历史判断原文：${this.esc(k.source_excerpt)}${k.excerpt_truncated?'（已截断，完整内容请查看来源）':''}</p>`:''}<p>${this.esc(k.recommendation)}</p><small>条件：${this.esc(this.conditions(k.conditions))}</small>${this.sources(k.sources)}</div>`).join('')); return;
         }
         if(action==='evolve'){const r=await this.call('evolve',{company:this.data.company});frappe.msgprint(`${r.note}；本次候选 ${r.candidates.length} 条。`);return this.load();}
         if(action==='stock')return this.prompt([{fieldname:'note',fieldtype:'Small Text',label:'逐物料核对可用库存、冻结/待检、按时在途及来源',reqd:1}],v=>this.call('confirm_stock',{process:this.process,fingerprint:this.data.fingerprint,...v}),'记录人工核对依据');

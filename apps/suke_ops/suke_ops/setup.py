@@ -99,6 +99,8 @@ def install():
     install_hub()
     from suke_ops.procurement_setup import install as install_procurement
     install_procurement()
+    from suke_ops.finance_sync.setup import install as install_finance
+    install_finance()
     frappe.reload_doc('buying', 'page', 'operations_hub')
     customize_navigation()
     repair_existing_reservations()

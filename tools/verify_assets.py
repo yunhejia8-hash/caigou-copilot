@@ -18,7 +18,8 @@ def verify(base_url):
     assets = sorted(set(manifest.values()) | {'/assets/suke_ops/hub.js', '/assets/suke_ops/hub.css',
                     '/assets/suke_ops/bear-pet.js', '/assets/suke_ops/bear-control.js',
                     '/assets/suke_ops/business_search.js', '/assets/suke_ops/business_search.css',
-                    '/assets/suke_ops/procurement.js', '/assets/suke_ops/procurement.css'})
+                    '/assets/suke_ops/procurement.js', '/assets/suke_ops/procurement.css',
+                    '/assets/suke_ops/finance_connections.js'})
     for path in assets:
         # 只请求本部署的静态资源，禁止清单引导请求外部地址。
         parsed = urlparse(path)

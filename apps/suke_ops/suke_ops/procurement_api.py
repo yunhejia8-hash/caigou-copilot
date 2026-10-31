@@ -1,6 +1,7 @@
 """采购闭环的受控入口；所有事实来自有权读取的原生单据。"""
 import json
 import time
+from contextvars import ContextVar
 from datetime import date, timedelta
 
 import frappe
@@ -14,6 +15,13 @@ TYPES = ('Material Request', 'Request for Quotation', 'Supplier Quotation', 'Pur
          'Operations Approval', 'Supply Case', 'Supply Decision')
 EDITORS = {'System Manager', 'Purchase Manager', 'Purchase User', 'Supply Planner', 'Supply Approver'}
 REVIEWERS = {'System Manager', 'Purchase Manager', 'Supply Approver'}
+ADVICE_DEADLINE = ContextVar('procurement_advice_deadline', default=None)
+
+
+def _budget():
+    deadline = ADVICE_DEADLINE.get()
+    if deadline is not None and time.monotonic() > deadline:
+        raise TimeoutError('本轮经验参考达到时限')
 
 
 def _json(value, default):
@@ -42,11 +50,13 @@ def _require(write=False, review=False):
 
 
 def _source(doctype, name, company=None):
+    _budget()
     if doctype not in TYPES:
         frappe.throw('不支持的采购来源类型')
     doc = frappe.get_doc(doctype, name)
     doc.check_permission('read')
     _check_fields(doc)
+    _budget()
     if doctype == 'Operations Approval':
         source = _source(doc.source_type, doc.source_name, company)
         actual_company = source.get('company')
@@ -65,30 +75,35 @@ def _source(doctype, name, company=None):
 def _check_fields(doc):
     # 快照会跨时间保留，保守要求来源及子表的字段权限完整，避免后续撤权后泄漏旧快照。
     for row in [doc, *(child for df in doc.meta.get_table_fields() for child in (doc.get(df.fieldname) or []))]:
+        _budget()
         if any(df.permlevel and not row.has_permlevel_access_to(df.fieldname) for df in row.meta.fields):
             frappe.throw('当前账号缺少采购快照所需的来源字段权限', frappe.PermissionError)
 
 
 def _inventory_permissions(process):
     for link in process.documents:
+        _budget()
         if link.document_type != 'Material Request':
             continue
         mr = frappe.get_doc('Material Request', link.document_name)
         if not frappe.has_permission('Bin', 'read'):
             frappe.throw('采购快照需要库存读取权限', frappe.PermissionError)
         for item in mr.items:
+            _budget()
             for doctype, name in [('Item', item.item_code), ('Warehouse', item.warehouse)]:
                 if name:
                     source = frappe.get_doc(doctype, name)
                     source.check_permission('read')
                     _check_fields(source)
-            for name in frappe.get_list('Bin', filters={'item_code': item.item_code, 'warehouse': item.warehouse}, pluck='name'):
+            for name in frappe.get_all('Bin', filters={'item_code': item.item_code, 'warehouse': item.warehouse}, pluck='name'):
+                _budget()
                 stock = frappe.get_doc('Bin', name)
                 stock.check_permission('read')
                 _check_fields(stock)
 
 
 def _process(name, write=False):
+    _budget()
     _require(write=write)
     if write:
         frappe.db.sql('select name from `tabProcurement Process` where name=%s for update', name)
@@ -97,6 +112,7 @@ def _process(name, write=False):
     frappe.get_doc('Company', doc.company).check_permission('read')
     # 公司权限不足或任一来源被撤权时整笔流程拒绝访问，不泄露数量及摘要。
     for row in doc.documents:
+        _budget()
         source = _source(row.document_type, row.document_name, doc.company)
         if source.doctype == 'Material Request' and _synthetic_source(source):
             doc.synthetic = 1
@@ -116,11 +132,6 @@ def guard(doc, method=None):
     """原生REST也必须经过同一写入约束，不能直接伪造审核或规则状态。"""
     if not doc.flags.procurement_write:
         frappe.throw('请使用采购流程工作台的受控操作', frappe.PermissionError)
-
-
-def settings_enabled():
-    return bool(frappe.db.exists('DocType', 'Procurement Settings') and
-                frappe.get_single('Procurement Settings').enabled)
 
 
 def private_query(user=None):
@@ -237,6 +248,7 @@ def _snapshot(process):
     rows, ordered, received, demands = [], {}, {}, []
     stock, warnings, quotes, reconciliation = [], [], [], []
     for doc in docs:
+        _budget()
         rows.append({'doctype': doc.doctype, 'name': doc.name, 'modified': str(doc.modified),
                      'docstatus': doc.docstatus, 'status': doc.get('status'), 'workflow_state': doc.get('workflow_state'),
                      'outstanding_amount': doc.get('outstanding_amount')})
@@ -270,6 +282,7 @@ def _snapshot(process):
     # 同物料同仓库需求先合并，避免把同一份库存重复抵扣多个需求行。
     grouped = {}
     for row in demands:
+        _budget()
         key = (row['item_code'], row['warehouse'], row['uom'])
         if key not in grouped:
             grouped[key] = dict(row)
@@ -480,6 +493,7 @@ def _experiences(company, include_legacy=False, deadline=None):
         frappe.throw('已超过本版500条候选经验的单次评估上限，请先按公司分批整理')
     result = []
     for row in rows:
+        _budget()
         if deadline and time.monotonic() > deadline:
             raise TimeoutError('经验检索达到本轮时限')
         exp = frappe.get_doc('Procurement Experience', row.name)
@@ -612,8 +626,7 @@ def knowledge(process, stage='order', _deadline=None):
     rules = []
     for row in frappe.get_all('Procurement Rule', filters={'company': proc.company, 'stage': stage,
                                 'state': 'active', 'valid_until': ['>=', nowdate()]}, fields=['name'], limit_page_length=101):
-        if len(rules) >= 5:
-            break
+        _budget()
         rule = frappe.get_doc('Procurement Rule', row.name)
         try:
             available = _rule_examples(rule, examples)
@@ -624,17 +637,23 @@ def knowledge(process, stage='order', _deadline=None):
                               'recommendation': rule.recommendation}, available, _json(rule.training_json, []))
         if not replay['eligible'] or proc.synthetic or not calc.match(_json(rule.conditions_json, []), current['context']):
             continue
-        rules.append({'name': rule.name, 'version': rule.version, 'recommendation': rule.recommendation,
+        rules.append({'name': rule.name, 'title': rule.title, 'version': rule.version, 'recommendation': rule.recommendation,
                       'conditions': _json(rule.conditions_json, []), 'valid_until': str(rule.valid_until),
                       'evaluation': _json(rule.evaluation_json, {})})
+    if len({r['recommendation'] for r in rules}) > 1:
+        return {'state': 'conflict', 'process': process, 'stage': stage, 'rules': [],
+                'experiences': experiences[:5], 'conflicting_rules': [r['name'] for r in rules],
+                'note': '当前条件命中多条不同建议的规则，已暂停规则建议，请负责人核实冲突'}
+    _budget()
     return {'state': 'ready', 'process': process, 'stage': stage, 'fingerprint': current['fingerprint'],
-            'rules': rules, 'experiences': experiences[:5],
+            'rules': rules[:5], 'experiences': experiences[:5],
             'note': '历史经验仅供参考；当前事实、制度和人工授权优先，缺少条件不匹配'}
 
 
 def safe_advice(process, stage='order'):
     """不调用模型；知识库失败只降级参考，不改变业务查询结果。"""
     old_timeout = None
+    token = ADVICE_DEADLINE.set(time.monotonic() + 1.0)
     try:
         frappe.db.savepoint('procurement_advice')
         if frappe.db.db_type == 'mariadb':
@@ -649,6 +668,7 @@ def safe_advice(process, stage='order'):
         return {'state': 'unavailable', 'rules': [], 'experiences': [],
                 'note': '经验参考暂不可用；本轮业务事实仍以原有工具结果为准'}
     finally:
+        ADVICE_DEADLINE.reset(token)
         if old_timeout is not None:
             try:
                 frappe.db.sql('set session max_statement_time=%s', (old_timeout,))
@@ -684,7 +704,7 @@ def library(process):
 
 
 def mandatory_approval(doc, method=None):
-    if doc.doctype != 'Purchase Order' or not settings_enabled():
+    if doc.doctype != 'Purchase Order' or not frappe.db.exists('DocType', 'Procurement Settings'):
         return
     if not frappe.get_single('Procurement Settings').mandatory_approval:
         return

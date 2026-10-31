@@ -11,6 +11,8 @@ from suke_ops import procurement_api as api, procurement as calc, approval, hub
 
 
 def run():
+    if not frappe.local.site.startswith('procurement-'):
+        raise RuntimeError('仅允许procurement-*独立合成验收站点，不在现有业务站点执行')
     original = frappe.session.user
     frappe.set_user('Administrator')
     checks = []

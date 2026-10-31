@@ -60,6 +60,14 @@ class ProcurementTests(unittest.TestCase):
         self.assertEqual(report['negative'], 1)
         self.assertEqual(report['tested'], 2)
 
+    def test_new_counterexample_in_training_case_invalidates_active_rule(self):
+        rows=self.examples()
+        rows.append(dict(rows[0],name='later-negative',outcome='negative',observed_at='2026-10-20T00:00:00'))
+        report=replay(rows[0],rows,training_ids=['0','1','2'])
+        self.assertEqual(report['tested'],2)
+        self.assertEqual(report['negative'],1)
+        self.assertFalse(report['eligible'])
+
     def test_future_outcomes_and_duplicate_process_labels_are_excluded(self):
         rows = self.examples()
         self.assertEqual(mine(rows, as_of='2026-10-03T09:00:00'), [])

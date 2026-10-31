@@ -69,6 +69,9 @@ def data_url(module):
 def entries():
     """目录只记录定义；记录数量和内容按请求实时查询。"""
     result = []
+    result.append(dict(id='page:erp-connections', label='企业数据连接', module='buying', kind='page',
+                       access_types=['External ERP Snapshot'], route='/desk/主页/erp-connections',
+                       description='查询金蝶云星空外部只读快照、同步状态与财务依据'))
     for module, label in MODULE_NAMES.items():
         if module == 'shared':
             continue

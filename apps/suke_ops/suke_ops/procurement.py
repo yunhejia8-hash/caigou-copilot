@@ -55,11 +55,14 @@ def replay(rule, examples, training_ids=(), as_of=None):
     """仅评估未参加归纳的案例；同一流程只计一次，矛盾标签不当作成功。"""
     training = set(training_ids)
     by_process = defaultdict(list)
+    counterexamples = {}
     for row in examples:
         if (as_of and row['observed_at'] > as_of) or row['stage'] != rule['stage'] or row['recommendation'] != rule['recommendation']:
             continue
         if row.get('verified') and not row.get('synthetic') and row.get('outcome') in ('positive', 'negative'):
             by_process[row.get('case_id', row['process'])].append(row)
+            if row['outcome'] == 'negative' and match(rule['conditions'], row['context']):
+                counterexamples[row.get('case_id', row['process'])] = row['name']
     tested, positive, negative, ids = 0, 0, 0, []
     excluded_processes = {r.get('case_id', r['process']) for r in examples if r['name'] in training}
     for process, rows in by_process.items():
@@ -73,9 +76,11 @@ def replay(rule, examples, training_ids=(), as_of=None):
             continue
         tested += 1
         positive += row['outcome'] == 'positive'
-        negative += row['outcome'] == 'negative'
         ids.append(row['name'])
+    # 成功率的留出集不得重复训练案例，但训练案例后来出现反例也必须使规则失效。
+    negative = len(counterexamples)
     return {'tested': tested, 'positive': positive, 'negative': negative, 'example_ids': ids,
+            'counterexample_ids': sorted(counterexamples.values()),
             'eligible': tested >= 2 and negative == 0,
             'limitation': '观察性历史回放，样本少且非因果证明；仍需人工审核并持续观察'}
 

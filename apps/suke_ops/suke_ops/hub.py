@@ -401,6 +401,9 @@ def module_tools(module):
     if module in demand.MODULES:
         specs.extend([runtime.schema('read_request_context', '按物料编码或名称查可采购物料、库存单位、公司和仓库候选；创建需求单前核实',
                                      {'search': runtime.text_schema()}, ['search']), demand.CREATE_TOOL])
+    if module in ('buying', 'buying-order', 'buying-comparison', 'buying-approval'):
+        from suke_ops.finance_sync.api import agent_tools
+        specs.extend(agent_tools(runtime))
     return [*specs, action_tool()]
 
 
@@ -441,6 +444,11 @@ def run_turn(name):
                     ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
 
         def execute_tool(module, tool, args):
+            if tool in ('list_external_connections', 'read_external_finance'):
+                if module not in ('control', 'buying', 'buying-order', 'buying-comparison', 'buying-approval'):
+                    frappe.throw('当前模块不能使用外部财务工具', frappe.PermissionError)
+                from suke_ops.finance_sync.api import agent_call
+                return agent_call(tool, args)
             if tool == 'report_action':
                 if not args['reason'].strip() or not args['next_step'].strip():
                     raise RuntimeError('行动结果缺少具体原因或下一步。')
@@ -607,6 +615,8 @@ def run_turn(name):
             if turn.agent_module == 'control' else module_tools(turn.agent_module)
         if turn.agent_module == 'control':
             specs.append(runtime.schema('read_module_reports', '读取各模块已上报分析与最新风险面板；研判上报时先调用', {}))
+            from suke_ops.finance_sync.api import agent_tools
+            specs.extend(agent_tools(runtime))
             specs.append(action_tool())
         try:
             tool_budget[0] -= 1
@@ -643,7 +653,14 @@ def run_turn(name):
             knowledge = safe_advice(**stored['procurement_context'])
             references = [*knowledge.get('rules', []), *knowledge.get('experiences', [])]
             # 参考由程序附加，不把经验文本变成模型指令；普通聊天完全不走此分支。
-            answer += '\n\n采购经验参考：' + ('；'.join(row['name'] + '：' + (row.get('source_excerpt', '') + ('（原文已截断，请查看来源）' if row.get('excerpt_truncated') else '') if row.get('legacy') else row['recommendation']) for row in references) if references else knowledge.get('note', '暂无适用的已核实经验'))
+            reference_lines = []
+            for row in references:
+                content = row.get('source_excerpt', '') if row.get('legacy') else row['recommendation']
+                label = '历史反例，不宜照搬：' if row.get('outcome') == 'negative' else '历史判断：' if row.get('legacy') else '参考建议：'
+                reference_lines.append(row['name'] + ' · ' + label + content + ('（原文已截断，请查看来源）' if row.get('excerpt_truncated') and row.get('legacy') else ''))
+            answer += '\n\n采购经验参考：' + ('；'.join(reference_lines) if references else knowledge.get('note', '暂无适用的已核实经验'))
+            if knowledge.get('state') == 'conflict':
+                answer += '\n' + knowledge['note']
             answer += '\n历史参考不覆盖当前事实和人工审批。'
         frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
                             'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'events': events, 'action': action, 'documents': documents,

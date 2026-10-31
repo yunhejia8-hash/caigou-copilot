@@ -22,3 +22,12 @@ has_permission = {name: 'suke_ops.procurement_api.document_permission' for name 
                   ('Procurement Process', 'Procurement Experience', 'Procurement Rule')}
 permission_query_conditions = {name: 'suke_ops.procurement_api.private_query' for name in
                                ('Procurement Process', 'Procurement Experience', 'Procurement Rule')}
+
+# 企业ERP只读快照；与采购闭环共存，不重写已有钩子。
+after_migrate = [after_migrate, 'suke_ops.finance_sync.setup.install']
+scheduler_events = {'cron': {'*/15 * * * *': ['suke_ops.finance_sync.service.scheduled']}}
+doc_events['ERP Connection'] = {'validate': 'suke_ops.finance_sync.service.validate_connection'}
+for finance_doctype in ('External ERP Snapshot', 'ERP Sync Run'):
+    doc_events[finance_doctype] = {'validate': 'suke_ops.finance_sync.service.guard'}
+has_permission['External ERP Snapshot'] = 'suke_ops.finance_sync.service.document_permission'
+permission_query_conditions['External ERP Snapshot'] = 'suke_ops.finance_sync.service.private_query'
