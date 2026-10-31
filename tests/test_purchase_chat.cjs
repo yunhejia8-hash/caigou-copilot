@@ -291,3 +291,78 @@ test('decision checks distinguish structured matches from unverified prose and s
  assert.ok(html.indexOf('总控建议存在冲突')<html.indexOf('保留模型实际答复'));
  assert.equal(h.turns[0].answer,'保留模型实际答复');
 });
+
+test('structured action separates real document counts, reason and next steps without implying execution',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub);
+ const html=h.renderActionResult({name:'ACTION',action:{status:'blocked',reason:'供应商尚未确认可用时间。',next_step:'1. 采购核实到仓时间。 2. 仓库核实预留归属。'},documents:[{doctype:'Material Request',name:'MR-1',reused:true}],offers:[]});
+ assert.match(html,/hub-action-result.*data-status="blocked"/);assert.match(html,/待处理阻碍/);
+ assert.match(html,/本轮关联单据 <strong>1<\/strong> 张/);assert.match(html,/可打开草稿入口 <strong>0<\/strong> 个/);
+ assert.match(html,/hub-action-section hub-reason/);assert.match(html,/data-section="next"/);
+ assert.match(html,/<ol class="hub-next-steps"><li>采购核实到仓时间。<\/li><li>仓库核实预留归属。<\/li><\/ol>/);
+ assert.ok(!html.includes('执行完成'));assert.ok(!html.includes('已保存业务单据'));
+});
+test('reported created or draft status needs matching records; missing and malformed action stays safe',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub);
+ for(const action of [undefined,null,'text',[],{}, {status:['document_created'],reason:4,next_step:{text:'bad'}}]) assert.equal(h.renderActionResult({action}),'');
+ const created=h.renderActionResult({action:{status:'document_created',reason:'模型声称创建'},documents:[null,{name:'no-type'}]});
+ assert.match(created,/单据状态待核对/);assert.ok(!created.includes('已登记物料需求单'));
+ assert.match(created,/尚未提供下一步/);assert.match(created,/本轮关联单据 <strong>0<\/strong>/);
+ const draft=h.renderActionResult({action:{status:'draft_ready'},offers:[{},null]});
+ assert.match(draft,/草稿入口待核对/);assert.match(draft,/尚未提供具体原因/);
+ const partial=h.renderActionResult({action:{reason:'待补供应确认'}});
+ assert.match(partial,/行动结果待核实/);assert.match(partial,/待补供应确认/);
+ const ready=h.renderActionResult({action:{status:'draft_ready'},offers:[{label:'询价草稿',action:'rfq',source:'MR-1'}]});
+ assert.match(ready,/已提供草稿入口/);assert.match(ready,/可打开草稿入口 <strong>1<\/strong>/);
+});
+test('long action reasons preserve the complete original behind a stable escaped disclosure',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub),reason='库存可用时间待核实。'.repeat(30)+'完整原因末尾<script>bad</script>';
+ const turn={name:'LONG"bad',action:{status:'blocked',reason,next_step:'请采购继续核实。'}};
+ const html=h.renderActionResult(turn);
+ assert.match(html,/data-audit-key="reason-LONG&quot;bad"/);assert.match(html,/展开完整原因/);
+ assert.ok(html.includes(h.esc(reason)));assert.ok(!html.includes('<script>'));assert.ok(!html.includes('<details open'));
+ assert.equal(turn.action.reason,reason);assert.ok(html.indexOf('原因与影响')<html.indexOf('下一步'));
+});
+test('action lists preserve decimals, dates and unsafe text; ambiguous numbering stays as prose',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub);
+ const html=h.actionSteps('1. 预算 1.5 万元，11.04 核实。 2. 联系 <img src=x onerror=bad()>，单价 2.50 元。');
+ assert.equal((html.match(/<li>/g)||[]).length,2);assert.match(html,/1\.5 万元，11\.04/);assert.match(html,/2\.50 元/);
+ assert.match(html,/&lt;img/);assert.ok(!html.includes('<img'));
+ for(const value of ['预算 1.5 万元，2026.11.04 到货。','先核查。 1. 联系采购。 2. 联系仓库。','1. 采购确认。 3. 仓库确认。','1. 2. 信息待核实。','1. 采购确认。 2、 仓库确认。']) {
+  const output=h.actionSteps(value);assert.ok(!output.includes('<ol'));assert.ok(output.includes(h.esc(value)));
+ }
+ assert.equal(h.actionSteps('采购核实。\n\n仓库复核。'),'<p>采购核实。</p><p>仓库复核。</p>');
+});
+test('consecutive action markers after Chinese sentence endings form steps without losing punctuation',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub);
+ const html=h.actionSteps('1. 采购核实 11.04 到货，费用 1.5 万元。2. 运维排查工具；3. 销售核实需求。4. 仓库核对预留。5. 信息补齐后重新评估。');
+ assert.equal((html.match(/<li>/g)||[]).length,5);
+ assert.match(html,/费用 1\.5 万元。<\/li><li>运维排查工具；<\/li><li>销售核实需求。/);
+ assert.match(html,/11\.04 到货/);assert.match(html,/重新评估。<\/li><\/ol>/);
+ for(const value of ['费用待确认。1.5 万元，11.04 到货。','1. 采购核实。3. 仓库核实。']) {
+  const output=h.actionSteps(value);assert.ok(!output.includes('<ol'));assert.ok(output.includes(value));
+ }
+});
+function renderedActionTurn(h,turn) {
+ let html='';const node={scrollTop:0,scrollHeight:300,clientHeight:300,querySelectorAll:()=>[]};
+ h.host={find:()=>({0:node,html:v=>{html=v;},scrollTop:()=>{}})};h.names={control:'总控'};
+ h.turns=[{name:'ACTION',question:'核对供给',state:'done',...turn}];h.renderMessages();return html;
+}
+test('action trailer is absent from compact summary but complete answer and original turn are preserved',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub);
+ const original='销售模块未完成核查。\n\n**本轮行动结果：待处理阻碍**\n\n已保存业务单据：0 张。\n原因：供应未确认\n\n下一步：请采购联系供应商。';
+ const turn={answer:original,action:{status:'blocked',reason:'供应未确认',next_step:'请采购联系供应商。'}};
+ const html=renderedActionTurn(h,turn),compact=html.split('data-audit-key="outcome-ACTION"')[0];
+ assert.match(compact,/当前结果/);assert.match(compact,/销售模块未完成核查/);assert.ok(!compact.includes('本轮行动结果'));
+ assert.ok(html.includes(h.esc(original)));assert.equal(h.turns[0].answer,original);assert.match(html,/hub-action-result/);
+});
+test('summary only removes the exact server trailer when structured action can be rendered',()=>{
+ const {Hub}=environment();
+ for(const turn of [
+  {answer:'原话 **本轮行动结果：待核查**',action:{status:'blocked'}},
+  {answer:'摘要\n\n**本轮行动结果：待核查**'},
+  {answer:'摘要\n\n**本轮行动结果：待核查**',action:{}}
+ ]) {
+  const h=priorityHub(Hub),html=renderedActionTurn(h,turn),compact=html.split('data-audit-key="outcome-ACTION"')[0];
+  assert.match(compact,/本轮行动结果/);
+ }
+});

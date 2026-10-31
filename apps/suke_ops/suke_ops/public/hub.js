@@ -295,6 +295,32 @@ frappe.SupplyHub = class {
         const issues = Array.isArray(check.issues) ? check.issues : [];
         return `<section class="hub-decision-check" data-status="${status}" role="status"><b>${labels[status]}</b><p>${this.esc(summary)}</p>${issues.length ? `<ul>${issues.map(issue => `<li>${this.esc(issue)}</li>`).join('')}</ul>` : ''}<small>仅核对排序、数量和执行状态等结构化字段；不认证模型自然语言，也不构成审批或执行授权。</small></section>`;
     }
+    actionSteps(value) {
+        const text = typeof value === 'string' ? value.trim() : '';
+        if (!text) return '<p>尚未提供下一步，请结合查询记录继续核实。</p>';
+        // Only explicit consecutive markers become a list; dates, amounts and ambiguous prose stay intact.
+        const markers = Array.from(text.matchAll(/(^|\s+|(?<=[。；]))(\d{1,2})([.、）)])\s+/g));
+        const steps = markers.map((match, index) => text.slice(match.index + match[0].length, markers[index + 1]?.index).trim());
+        const numbered = markers.length > 1 && markers[0].index === 0 && markers.every((match, index) => Number(match[2]) === index + 1 && match[3] === markers[0][3] && steps[index]);
+        if (numbered) return `<ol class="hub-next-steps">${steps.map(step => `<li>${this.esc(step).replace(/\n/g, '<br>')}</li>`).join('')}</ol>`;
+        return text.split(/\n\s*\n/).map(paragraph => `<p>${this.esc(paragraph).replace(/\n/g, '<br>')}</p>`).join('');
+    }
+    renderActionResult(turn) {
+        const action = turn.action;
+        if (!action || typeof action !== 'object' || Array.isArray(action)) return '';
+        const reason = typeof action.reason === 'string' ? action.reason.trim() : '';
+        const next = typeof action.next_step === 'string' ? action.next_step.trim() : '';
+        const statuses = {analysis_only: '仅完成分析', blocked: '待处理阻碍', draft_ready: '已提供草稿入口', document_created: '已登记物料需求单'};
+        const status = typeof action.status === 'string' && Object.hasOwn(statuses, action.status) ? action.status : 'unverified';
+        if (status === 'unverified' && !reason && !next) return '';
+        const documents = Array.isArray(turn.documents) ? turn.documents.filter(doc => doc && typeof doc.doctype === 'string' && doc.doctype && typeof doc.name === 'string' && doc.name) : [];
+        const offers = Array.isArray(turn.offers) ? turn.offers.filter(offer => offer && typeof offer.label === 'string' && typeof offer.action === 'string' && typeof offer.source === 'string') : [];
+        const label = status === 'document_created' && !documents.length ? '单据状态待核对' : status === 'draft_ready' && !offers.length ? '草稿入口待核对' : statuses[status] || '行动结果待核实';
+        return `<section class="hub-action-result" data-status="${status}"><header class="hub-action-status"><h3>本轮行动</h3><span class="hub-proof-badge">${label}</span></header>
+        <div class="hub-action-facts"><span>本轮关联单据 <strong>${documents.length}</strong> 张</span><span>可打开草稿入口 <strong>${offers.length}</strong> 个</span></div>
+        <section class="hub-action-section hub-reason"><h4>原因与影响</h4><p>${this.esc(reason ? (reason.length > 200 ? this.plainSummary(reason, 200) : reason) : '尚未提供具体原因，请查看查询记录。').replace(/\n/g, '<br>')}</p>${reason.length > 200 ? `<details data-audit-key="reason-${this.esc(turn.name)}"><summary>展开完整原因</summary><p>${this.esc(reason).replace(/\n/g, '<br>')}</p></details>` : ''}</section>
+        <section class="hub-action-section" data-section="next"><h4>下一步</h4>${this.actionSteps(next)}</section></section>`;
+    }
     scenarioBrief(snapshot, key, turn = {}) {
         if (snapshot?.scenario_key !== 'connector-1286') return '';
         const c = snapshot.calculation || {}, change = snapshot.change, sources = snapshot.rich_sources || [];
@@ -370,13 +396,16 @@ frappe.SupplyHub = class {
         let markup = this.turns.length ? this.turns.map(turn => {
             const completed = ['done', 'failed'].includes(turn.state);
             const replies = (turn.discussion || []).length;
-            const summary = turn.answer || (turn.state === 'failed' ? '本次分析未完成，请检查记录后重试。' : '正在核对依据，反馈将逐步显示。');
+            const originalAnswer = turn.answer || (turn.state === 'failed' ? '本次分析未完成，请检查记录后重试。' : '正在核对依据，反馈将逐步显示。');
+            const actionResult = this.renderActionResult(turn);
+            const actionMarker = actionResult ? originalAnswer.lastIndexOf('\n\n**本轮行动结果：') : -1;
+            const summary = actionMarker >= 0 ? originalAnswer.slice(0, actionMarker).trim() : originalAnswer;
             const timing = turn.timing ? ` · ${(turn.timing.total_ms / 1000).toFixed(1)}秒 · ${turn.timing.model_calls}次模型请求` : '';
             const snapshot = turn.verified_evidence;
             const audit = turn.events?.length ? this.auditTrail(turn) : (turn.discussion || []).map((row,i) => `<details data-audit-key="legacy-${this.esc(turn.name)}-${i}"><summary>${this.esc(this.names[row.module])} · ${this.esc(row.phase)} · 待核实</summary><div class="hub-markdown">${this.answer(row.answer)}</div></details>`).join('');
             return `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><div class="hub-run-head"><b>${turn.synthetic ? '合成场景 · 真实协作' : this.esc(this.names[turn.agent_module] || '总控') + ' Agent'}</b><span>${completed ? '本轮结束' : '正在协同'}${replies ? ' · ' + replies + '/10项反馈' : ''}</span></div>${this.scenarioBrief(snapshot,turn.name,turn)}
             ${this.decisionStatus(turn.decision_check)}
-            <div class="hub-outcome"><b>${completed ? ((turn.priority_assessment || snapshot?.priority_assessment) ? '总控建议（待复核）' : '当前结论与下一步') : '正在核查'}</b><small>${this.esc(timing)}</small><p>${this.esc(this.plainSummary(summary))}</p>${summary.length > 220 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(summary)}</div></details>` : ''}</div>
+            <div class="hub-outcome"><b>${completed ? ((turn.priority_assessment || snapshot?.priority_assessment) ? '总控建议（待复核）' : actionResult ? '当前结果' : '当前结论与下一步') : '正在核查'}</b><small>${this.esc(timing)}</small><p>${this.esc(this.plainSummary(summary || '行动结果与后续安排见下方。'))}</p>${originalAnswer.length > 220 || actionMarker >= 0 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(originalAnswer)}</div></details>` : ''}</div>${actionResult}
             ${completed && audit ? `<details data-audit-key="process-${this.esc(turn.name)}"><summary>查看部门协作过程 · ${turn.events?.length || replies} 条留痕</summary>${audit}</details>` : audit}${this.scenarioActions(snapshot,turn.name,turn)}
             ${turn.synthetic ? '<p class="hub-table-note">模型反馈待核实；不自动采购、不释放预留。来源没有提供人时明确留空。</p>' : ''}
             ${snapshot?.scenario_key === 'connector-1286' && !snapshot.updated && !snapshot.human_sources?.length && turn.state === 'done' ? `<button type="button" data-scenario-update="${this.esc(turn.name)}">加载10:18演示新消息：200 → 120</button>` : ''}
