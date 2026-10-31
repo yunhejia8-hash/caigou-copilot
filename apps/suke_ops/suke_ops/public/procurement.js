@@ -136,7 +136,7 @@ frappe.ProcurementWorkspace = class {
         if(action==='chat') {
             const context=this.data.documents.filter(d=>d.docstatus!==2).map(d=>d.name).join('、');
             const dialog=new frappe.ui.Dialog({title:'采购流程讨论',size:'extra-large'});
-            await frappe.require(['/assets/suke_ops/hub.js?v=supply-practice-v1.js','/assets/suke_ops/hub.css?v=supply-practice-v1.css']);
+            await frappe.require(['/assets/suke_ops/hub.js?v=supply-practice-v2.js','/assets/suke_ops/hub.css?v=supply-practice-v2.css']);
             dialog.show();
             const chat=new frappe.SupplyHub({main:dialog.$body},'chat','buying',{embedded:true,procurementProcess:this.process,procurementStage:this.stage});
             chat.host.find('textarea').val(`请核对采购流程 ${this.data.title} 的${this.stages[this.stage]}环节，相关单据：${context}。`);

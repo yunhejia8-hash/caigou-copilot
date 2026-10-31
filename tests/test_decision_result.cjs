@@ -259,3 +259,19 @@ test('practice quick entry is shown only for an available control dataset and st
     h.data.practice_available=false;context.frappe.SupplyHub.prototype.render.call(h);
     assert.ok(!nodes.get('.hub-prompts').markup.includes('data-open-supply-practice'));
 });
+test('executed practice separates current free stock from the approved historical allocation snapshot', () => {
+    const {h}=environment(),t=practiceTurn();h.data={model_ready:false};
+    t.resolution.state='executed';t.resolution.can={};t.resolution.selected_plan='sales';
+    t.resolution.choices=t.resolution.choices.slice(0,1);
+    t.resolution.choices[0].stock_uom='件';t.resolution.choices[0].summary='本次可分配现存自由库存 200 件';
+    t.resolution.choices[0].allocations[0].current_new_qty=200;
+    t.practice.metrics=[{label:'当前自由库存',value:0,unit:'件'}];
+    const html=h.resolutionCard(t),snapshot=html.slice(html.indexOf('执行时获批方案'));
+    assert.match(html,/当前自由库存<\/span><strong>0 /);
+    assert.match(html,/已执行；本区展示当前库存，下方为当时获批方案与回执/);
+    assert.match(html,/执行前可用量 200 件/);assert.match(html,/执行前可用量 · 件<\/small><strong>200/);
+    assert.match(html,/本次已预留 200 件/);assert.match(html,/当时需求/);assert.match(html,/获批分配/);
+    assert.ok(!snapshot.includes('当前自由库存'));assert.ok(!snapshot.includes('本次新增'));assert.ok(!snapshot.includes('本次可分配现存自由库存'));
+    assert.ok(!html.includes('可直接选择'));assert.match(html,/仍可查看实际库存、审批记录和执行回执/);
+    assert.equal(t.resolution.choices[0].summary,'本次可分配现存自由库存 200 件');
+});
