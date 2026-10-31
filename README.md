@@ -60,3 +60,8 @@ python tools/verify_realtime.py
 本次已在用户明确授权后，用 `api.deepseek.com` 对合成数据完成真实总控和四模块协作，记录见 [model-live.json](verification/model-live.json)。工具协议参考 [DeepSeek Anthropic 兼容说明](https://api-docs.deepseek.com/guides/anthropic_api/)。部署到其他环境时需自行配置模型服务并明确业务数据的外发授权，仓库不附带凭据。
 
 启动前在 PowerShell 环境中配置上述三个 `ANTHROPIC_*` 变量，或写入仅本地的 `.env`；服务读取后端环境变量。更新代码后执行 `docker compose up -d --build`，如有单据结构变更再运行 `docker compose exec -T backend bench --site focus.local migrate`。
+
+
+## 独立采购需求预审网页
+
+新增 [apps/procurement_intake](apps/procurement_intake/README.md)：本地对话式需求预审，支持用量依据识别、澄清补充、新物料人工复核及 PDF。独立端口8765，不替换现有 ERPNext 主页，尚未连接其实时库存、预算或审批权限。启动、数据导入和57项测试说明见模块文档。
