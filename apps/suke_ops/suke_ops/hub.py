@@ -2,6 +2,7 @@
 import hashlib
 import json
 import uuid
+import time
 
 import frappe
 from frappe.utils import cint, flt, now_datetime, nowdate
@@ -276,13 +277,41 @@ def owned_turn(name):
 
 
 @frappe.whitelist(methods=['POST'])
-def start(question, module='control', conversation=None, request_id=None):
+def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None):
     require_user()
     check_module(module, control=True)
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
         frappe.throw('请输入 1–2000 字的问题。')
     if not runtime.configured():
         frappe.throw('尚未配置模型服务；面板和手动功能仍可使用。')
+    scenario = None
+    if scenario_id is not None:
+        from suke_ops.live_discussion import evidence
+        if module != 'control':
+            frappe.throw('场景讨论仅支持总控。')
+        scenario = evidence(int(scenario_id), scenario_updated in (True, 1, '1', 'true'))
+    if previous_turn:
+        prior = owned_turn(previous_turn)
+        if prior.state != 'done' or module != 'control':
+            frappe.throw('请等待原讨论结束后补充信息。')
+        scenario = json.loads(prior.result or '{}').get('verified_evidence')
+        if not scenario or not scenario.get('synthetic'):
+            frappe.throw('此入口仅用于合成场景复核。')
+        if not isinstance(human_note, str) or not human_note.strip() or len(human_note) > 1000:
+            frappe.throw('请输入1–1000字补充信息。')
+        notes = scenario.setdefault('human_sources', [])
+        if len(notes) >= 10:
+            frappe.throw('本案例已达到10条补充上限，请整理后重新建案。')
+        note = human_note.strip()
+        notes.append({'id': 'H' + str(len(notes) + 1), 'label': '人员补充（待核实）',
+                      'text': note, 'reported_by': frappe.session.user, 'reported_at': str(now_datetime()),
+                      'source_type': '登录用户补充', 'source_path': prior.name,
+                      'verification': '尚未核实，不代表供应商确认或审批通过',
+                      'version': hashlib.sha256(note.encode()).hexdigest()[:12]})
+        scenario['previous_turn'] = prior.name
+        scenario['verified_plan'] = {}
+        scenario['calculation'] = {'status': '已有人员补充；旧计算已暂停，需重新核实输入。'}
+        scenario['evidence_precedence'] = '原证据为历史基线；人员补充尚未核实，不自动覆盖原约束，不直接执行。'
     conversation = str(uuid.UUID(conversation)) if conversation else str(uuid.uuid4())
     request_id = str(uuid.UUID(request_id)) if request_id else str(uuid.uuid4())
     key = hashlib.sha256((frappe.session.user + ':' + request_id).encode()).hexdigest()
@@ -299,7 +328,8 @@ def start(question, module='control', conversation=None, request_id=None):
             frappe.throw('上一条分析尚未完成，请稍候。')
         frappe.db.set_value('Agent Turn', row.name, {'state': 'failed', 'answer': '分析超时，请重新发送。'})
     doc = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation, 'request_key': key,
-                         'agent_module': module, 'question': question.strip(), 'state': 'queued'}).insert(ignore_permissions=True)
+                         'agent_module': module, 'question': question.strip(), 'state': 'queued',
+                         'result': json.dumps({'scenario': scenario}, ensure_ascii=False) if scenario else None}).insert(ignore_permissions=True)
     frappe.enqueue('suke_ops.hub.run_turn', queue='long', timeout=900, enqueue_after_commit=True,
                    job_id='agent-' + doc.name, name=doc.name)
     return {'name': doc.name, 'conversation': conversation}
@@ -309,7 +339,7 @@ def start(question, module='control', conversation=None, request_id=None):
 def poll(name):
     doc = owned_turn(name)
     return {'name': doc.name, 'state': doc.state, 'answer': doc.answer,
-            **(json.loads(doc.result or '{}') if doc.state == 'done' else {})}
+            **(json.loads(doc.result or '{}') if doc.state in ('done', 'running', 'failed') else {})}
 
 
 @frappe.whitelist()
@@ -321,9 +351,10 @@ def history(conversation, module=None):
         check_module(module, control=True)
         filters['agent_module'] = module
     rows = frappe.get_list('Agent Turn', filters=filters,
-                           fields=['name', 'question', 'answer', 'agent_module', 'state'],
+                           fields=['name', 'question', 'answer', 'agent_module', 'state', 'result'],
                            order_by='creation desc, name desc', limit_page_length=50)
-    return list(reversed(rows))
+    # One permission-filtered read instead of up to 50 sequential browser poll calls.
+    return [{**json.loads(row.pop('result') or '{}'), **row} for row in reversed(rows)]
 
 
 def read_record(module, doctype, name):
@@ -336,6 +367,10 @@ def read_record(module, doctype, name):
             frappe.throw('单据不属于该采购环节。', frappe.PermissionError)
     result = {field: doc.get(field) for field in fields_for(doctype)}
     result['doctype'] = doctype
+    result['_provenance'] = {'doctype': doctype, 'name': doc.name, 'created_by': doc.owner,
+                             'created_at': str(doc.creation), 'modified_by': doc.modified_by,
+                             'modified_at': str(doc.modified), 'read_at': str(now_datetime()),
+                             'note': '创建/修改账号不等于业务信息承诺人；未提供者不推定。'}
     for table in ('items', 'required_items', 'suppliers'):
         if doc.meta.has_field(table) and not cint(doc.meta.get_field(table).permlevel):
             item_fields = ['item_code', 'qty', 'stock_qty', 'rate', 'uom', 'stock_uom', 'conversion_factor', 'amount', 'warehouse', 'schedule_date',
@@ -400,45 +435,46 @@ def run_turn(name):
     frappe.db.commit()
     trace, offers, budget, tool_budget = [], [], [18], [48]
     module_results = []
+    board_cache = {}
+    run_started = time.monotonic()
     try:
         require_user()
+        stored = json.loads(turn.result or '{}')
+        if stored.get('scenario'):
+            from suke_ops.live_discussion import discuss
+            def publish_event(state):
+                state['mode'] = '真实模型讨论 / 合成证据 / 不执行'
+                frappe.db.set_value('Agent Turn', name, 'result', json.dumps(state, ensure_ascii=False))
+                frappe.db.commit()
+            result = discuss(stored['scenario'], turn.question, lambda rows: None, on_event=publish_event)
+            frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': result['answer'],
+                                'result': json.dumps(result, ensure_ascii=False)})
+            frappe.db.commit()
+            return
         previous = frappe.get_all('Agent Turn', filters={'owner': turn.owner, 'conversation': turn.conversation,
-                                 'state': 'done', 'agent_module': turn.agent_module, 'creation': ['<', turn.creation]}, fields=['question', 'answer'],
+                                 'state': 'done', 'agent_module': turn.agent_module, 'creation': ['<', turn.creation]}, fields=['question', 'answer', 'result'],
                                   order_by='creation desc', limit_page_length=4)
-        messages = [message for row in reversed(previous) for message in
+        messages = [message for row in reversed(previous) if not json.loads(row.result or '{}').get('synthetic') for message in
                     ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
 
-        def dispatch(module, tool, args):
+        def execute_tool(module, tool, args):
             if module == 'buying' and tool == 'read_procurement_progress':
                 return {'stages': [stage_board(key) for key in STAGE_DOCS],
                         'reports': [row for row in latest_reports() if row['module'] in STAGE_DOCS]}
             if module == 'control' and tool == 'read_module_reports':
-                return {'reports': latest_reports(), 'current_boards': [module_board(key) for key in MODULE_DOCS],
+                for key in MODULE_DOCS:
+                    if key not in board_cache:
+                        board_cache[key] = {**module_board(key), 'read_at': str(now_datetime())}
+                return {'reports': latest_reports(), 'current_boards': [board_cache[key] for key in MODULE_DOCS],
                         'note': '历史汇报可能过时，业务事实须按当前面板核实。'}
             if module == 'control' and tool == 'ask_module':
-                target = args['module']
-                # 同模块不同问法也复用已完成摘要，防止总控反复委派耗尽预算。
-                previous_result = next((row for row in module_results if row['module'] == target), None)
-                if previous_result:
-                    return previous_result
-                # 子模块最多4次模型请求，为总控保留1次汇总机会。
-                child_budget = [max(0, min(4, budget[0] - 1))]
-                initial = child_budget[0]
-                try:
-                    answer = runtime.respond(target, args['question'], [], module_tools(target), dispatch, trace,
-                                             budget=child_budget, tool_budget=tool_budget)
-                    result = {'module': target, 'status': 'done', 'answer': answer}
-                except RuntimeError as error:
-                    result = {'module': target, 'status': 'failed', 'answer': str(error)}
-                    trace.append({'agent': target, 'tool': 'module_failed', 'error': str(error)})
-                finally:
-                    budget[0] -= initial - child_budget[0]
-                module_results.append(result)
-                return result
+                return run_module_batch([args])[0]
             if module not in AGENT_DOCS:
                 frappe.throw('未知模块。', frappe.PermissionError)
             if tool == 'read_module_board':
-                return module_board(module)
+                if module not in board_cache:
+                    board_cache[module] = {**module_board(module), 'read_at': str(now_datetime())}
+                return board_cache[module]
             if tool == 'list_records':
                 if args['doctype'] not in AGENT_DOCS[module] + SHARED_DOCS:
                     frappe.throw('单据越权。', frappe.PermissionError)
@@ -457,14 +493,113 @@ def run_turn(name):
                 return {**offer, 'state': '待用户打开，尚未创建单据'}
             frappe.throw('未授权工具。', frappe.PermissionError)
 
-        specs = [runtime.schema('ask_module', '委派任务给指定业务 Agent，必要时依次询问多个模块',
+        events = []
+        def audit(module, kind, summary, **extra):
+            events.append({'id': len(events)+1, 'module': module, 'kind': kind,
+                           'phase': '业务查询', 'at': str(now_datetime()), 'summary': summary, **extra})
+            frappe.db.set_value('Agent Turn', name, 'result', json.dumps({'events': events, 'trace': trace, 'offers': offers}, ensure_ascii=False, default=str))
+            frappe.db.commit()
+        def dispatch(module, tool, args):
+            labels = {'ask_module': '委派部门核查', 'read_module_reports': '读取部门汇报', 'read_module_board': '核查业务看板', 'list_records': '查询单据清单', 'read_record': '核对单据详情', 'compare_supply_case': '计算缺料方案', 'offer_draft': '准备草稿入口'}
+            reused = tool == 'read_module_board' and module in board_cache
+            audit(module, 'query', '复用本轮已读取看板（保留原读取时间）' if reused else labels.get(tool, tool), tool=tool, query=args)
+            started = time.monotonic()
+            try:
+                value = execute_tool(module, tool, args)
+            except Exception:
+                audit(module, 'failed', '查询失败或无权限，未取得可用依据。', tool=tool)
+                raise
+            encoded = json.dumps(value, ensure_ascii=False, default=str)
+            audit(module, 'evidence', '已取得查询结果，展开查看返回记录', tool=tool,
+                  query=args, result_excerpt=encoded[:12000], truncated=len(encoded)>12000,
+                  duration_ms=round((time.monotonic()-started)*1000), reused=reused)
+            return value
+
+        def run_module_batch(requests):
+            from suke_ops.parallel_work import run_parallel
+            jobs, prepared = [], {}
+            remaining = len({args['module'] for args in requests} - {row['module'] for row in module_results})
+            for args in requests:
+                target = args['module']
+                previous_result = next((row for row in module_results if row['module'] == target), None)
+                if previous_result:
+                    prepared[target] = previous_result
+                    continue
+                if target in prepared:
+                    continue
+                prepared[target] = None
+                if tool_budget[0] < 1:
+                    prepared[target] = {'module': target, 'status': 'failed', 'answer': '本轮查询预算不足，尚未核实。'}
+                    module_results.append(prepared[target])
+                    remaining -= 1
+                    continue
+                tool_budget[0] -= 1  # Program pre-read is a real read, not a free model tool.
+                # Reserve bounded per-child budgets on this thread; unused quota returns on completion.
+                quota = min(4, max(0, budget[0]-1) // max(1, remaining))
+                tools_quota = min(10, tool_budget[0] // max(1, remaining))
+                remaining -= 1
+                budget[0] -= quota
+                tool_budget[0] -= tools_quota
+                evidence = dispatch(target, 'read_module_board', {})
+                jobs.append({'module': target, 'question': args['question'], 'evidence': evidence,
+                             'budget': [quota], 'tool_budget': [tools_quota], 'specs': module_tools(target)})
+                audit(target, 'started', '正在核查；独立部门同时进行。')
+
+            def child(job, call):
+                started, child_trace = time.monotonic(), []
+                try:
+                    answer = runtime.respond(job['module'], job['question'] + '\n向总控用最多3条短句汇报关键发现、依据和待确认事项，不重复背景。',
+                        [], job['specs'], lambda *args: call('tool', *args), child_trace,
+                        budget=job['budget'], tool_budget=job['tool_budget'], initial_evidence=job['evidence'])
+                    result = {'module': job['module'], 'status': 'done', 'answer': answer}
+                except Exception:
+                    result = {'module': job['module'], 'status': 'failed', 'answer': '本部门未完成核查，请重试；不得按已确认处理。'}
+                result['duration_ms'] = round((time.monotonic()-started)*1000)
+                return call('complete', job, result, child_trace)
+
+            def service(kind, *args):
+                if kind == 'tool':
+                    return dispatch(*args)
+                job, result, child_trace = args
+                budget[0] += job['budget'][0]
+                tool_budget[0] += job['tool_budget'][0]
+                trace.extend(child_trace)
+                module_results.append(result)
+                prepared[result['module']] = result
+                from suke_ops.live_discussion import short_reply
+                audit(result['module'], 'reply' if result['status'] == 'done' else 'failed', short_reply(result['answer']),
+                      result_excerpt=json.dumps(result, ensure_ascii=False), duration_ms=result['duration_ms'])
+                return result
+
+            run_parallel(jobs, child, service, max_workers=4)
+            return [prepared[args['module']] for args in requests]
+
+        def dispatch_many(module, calls):
+            values, delegated = [None] * len(calls), []
+            for index, (tool, args) in enumerate(calls):
+                if module == 'control' and tool == 'ask_module':
+                    audit(module, 'query', '委派部门并行核查', tool=tool, query=args)
+                    delegated.append((index, args))
+                else:
+                    values[index] = dispatch(module, tool, args)
+            if delegated:
+                for (index, args), value in zip(delegated, run_module_batch([args for _, args in delegated])):
+                    values[index] = value
+                    audit(module, 'evidence', '已收到部门反馈；按原部门记录追查依据。', tool='ask_module', query=args,
+                          result_excerpt=json.dumps(value, ensure_ascii=False), truncated=False)
+            return values
+
+        specs = [runtime.schema('ask_module', '委派任务给指定业务 Agent；独立部门请在同一批发起，以便并行核查',
                                 {'module': runtime.text_schema(AGENT_DOCS), 'question': runtime.text_schema()}, ['module', 'question'])] \
             if turn.agent_module == 'control' else module_tools(turn.agent_module)
         if turn.agent_module == 'control':
             specs.append(runtime.schema('read_module_reports', '读取各模块已上报分析与最新风险面板；研判上报时先调用', {}))
         try:
+            tool_budget[0] -= 1
+            initial = dispatch(turn.agent_module, 'read_module_reports' if turn.agent_module == 'control' else 'read_module_board', {})
             answer = runtime.respond(turn.agent_module, turn.question, messages, specs, dispatch, trace,
-                                     budget=budget, tool_budget=tool_budget)
+                                     budget=budget, tool_budget=tool_budget, initial_evidence=initial,
+                                     batch_dispatch=dispatch_many)
         except RuntimeError:
             if not any(row['status'] == 'done' for row in module_results):
                 raise
@@ -475,13 +610,15 @@ def run_turn(name):
         if failed_modules:
             answer += '\n\n未核实模块：' + '、'.join(failed_modules) + '。可切换对应模块重试。'
         frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
-                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results}, ensure_ascii=False, default=str)})
+                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'events': events,
+                                'timing': {'total_ms': round((time.monotonic()-run_started)*1000),
+                                           'model_calls': sum(row.get('tool') == 'model_request' for row in trace)}}, ensure_ascii=False, default=str)})
     except Exception as error:
         frappe.db.rollback()
         frappe.db.set_value('Agent Turn', name, {'state': 'failed',
                             'answer': ('本轮分析未完成：' + str(error) if type(error) is RuntimeError else
                                        '本轮分析未完成：请检查业务权限或问题范围后重试。') + ' 业务单据未由 Agent 保存或提交。',
-                            'result': json.dumps({'error_type': type(error).__name__, 'trace': trace}, ensure_ascii=False)})
+                            'result': json.dumps({**json.loads(frappe.db.get_value('Agent Turn', name, 'result') or '{}'), 'error_type': type(error).__name__, 'trace': trace}, ensure_ascii=False)})
     frappe.db.commit()
 
 
@@ -514,3 +651,24 @@ def open_draft(name, index):
     doc.name = None
     doc.set('__islocal', 1)
     return doc.as_dict()
+
+
+@frappe.whitelist()
+def discussion_activity(module='control'):
+    """Only the caller's recent runs; department workspaces share the same audit trail."""
+    require_user()
+    check_module(module, control=True)
+    rows = frappe.get_list('Agent Turn', filters={'owner': frappe.session.user},
+                           fields=['name', 'question', 'state', 'result', 'modified'],
+                           order_by='modified desc', limit_page_length=8)
+    activity = []
+    for row in rows:
+        data = json.loads(row.result or '{}')
+        events = [e for e in data.get('events', []) if module == 'control' or e.get('module') == module]
+        if not events and row.state not in ('queued', 'running'):
+            continue
+        ids = {sid for event in events for sid in event.get('source_ids', [])}
+        activity.append({'name': row.name, 'question': row.question, 'state': row.state,
+                         'events': events, 'sources': [r for r in data.get('sources', []) if r['id'] in ids],
+                         'discussion': data.get('discussion', []), 'synthetic': data.get('synthetic', False)})
+    return activity

@@ -123,7 +123,7 @@ def run():
         result = hub.poll(turn2.name)
         assert result['state'] == 'done', result
         assert {row['agent'] for row in result['trace']} == {'control', *hub.MODULE_DOCS}
-        assert len(result['trace']) == 8
+        assert len([row for row in result['trace'] if row['tool'] != 'model_request']) == 8
         checks.append('总控实际委派四模块，四个独立Agent均调用各自业务工具（模型响应模拟）')
         repeated = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': str(uuid.uuid4()),
                                    'agent_module': 'control', 'question': '重复委派预算验证', 'state': 'queued'}).insert(ignore_permissions=True)
@@ -150,7 +150,7 @@ def run():
         def partial_provider(system, messages, tools):
             if '你是销售 Agent' in system:
                 raise RuntimeError('合成测试：销售服务暂不可用')
-            if tools[0]['name'] == 'ask_module' and len(messages) > 1:
+            if tools[0]['name'] == 'ask_module' and any(isinstance(m['content'], list) and any(b.get('type') == 'tool_result' for b in m['content']) for m in messages):
                 raise RuntimeError('合成测试：汇总失败')
             return provider(system, messages, tools)
         with patch('suke_ops.agent_runtime.request_model', partial_provider):
@@ -159,7 +159,7 @@ def run():
         assert partial_result['state'] == 'done', partial_result
         assert '销售：本轮未核实' in partial_result['answer']
         assert '采购：已根据实际工具' in partial_result['answer']
-        assert any(row['tool'] == 'module_failed' for row in partial_result['trace'])
+        assert any(row['kind'] == 'failed' and row['module'] == 'selling' for row in partial_result['events'])
         checks.append('子模块失败不阻断其他模块，汇总失败保留已完成结论并标注未核实模块')
         report_turn = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': str(uuid.uuid4()),
                                      'agent_module': 'stock', 'question': '库存巡检', 'answer': '合成验收：库存问题需要总控协调', 'state': 'done'}).insert(ignore_permissions=True)
@@ -171,7 +171,7 @@ def run():
         names.append(control_report.name)
         frappe.db.commit()
         def report_provider(system, messages, tools):
-            if len(messages) == 1:
+            if isinstance(messages[-1]['content'], str):
                 return {'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': 'reports', 'name': 'read_module_reports', 'input': {}}]}
             payload = json.loads(messages[-1]['content'][0]['content'])
             assert any(row['turn'] == report_turn.name for row in payload['reports'])
@@ -205,8 +205,8 @@ def run():
                 allowed = next(tool for tool in tools if tool['name'] == 'read_record')['input_schema']['properties']['doctype']['enum']
                 assert set(allowed) == set(hub.STAGE_DOCS[module] + hub.SHARED_DOCS)
                 assert 'Sales Order' not in allowed
-                assert len(messages) == 1 or isinstance(messages[-1]['content'], list), '不应读取同会话其他专项的历史'
-                if len(messages) == 1:
+                assert (len(messages) == 2 and all(row['role'] == 'user' for row in messages)) or isinstance(messages[-1]['content'], list), '不应读取同会话其他专项的历史'
+                if isinstance(messages[-1]['content'], str):
                     return {'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': 'stage', 'name': 'read_module_board', 'input': {}}]}
                 payload = json.loads(messages[-1]['content'][0]['content'])
                 assert payload['module'] == module and payload['columns']

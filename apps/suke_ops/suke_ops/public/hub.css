@@ -45,3 +45,23 @@
 .hub-tabs a{padding:13px 20px;color:#728177;white-space:nowrap;border-bottom:3px solid transparent;text-decoration:none}.hub-tabs a[aria-current=page]{border-color:var(--hub-green);color:var(--hub-green);font-weight:700}
 a.hub-metric{display:block;text-decoration:none}.hub-module-board .hub-summary{grid-template-columns:repeat(2,minmax(120px,1fr))}.hub-module-board .hub-metric{padding:10px}.hub-module-board .hub-metric strong{font-size:23px}
 @media(max-width:900px){.hub-workspace{display:flex;flex-direction:column;overflow:auto}.hub-chat-page .hub-chat{flex:none;height:65dvh}.hub-module-board{overflow:visible;border-left:0;border-top:1px solid var(--hub-line)}.hub-tabs a{padding:12px}}
+
+/* 异常单内嵌对话沿用同一 Agent，只隐藏主页导航与重复面板。 */
+.supply-hub.hub-case-chat { padding: 0; }
+.hub-case-chat .hub-heading, .hub-case-chat .hub-tabs,
+.hub-case-chat .hub-summary, .hub-case-chat .hub-aside,
+.hub-case-chat .hub-detail, .hub-case-chat .hub-updated { display: none; }
+.hub-case-chat .hub-layout { display: block; }
+.hub-case-chat .hub-chat { min-height: 0; }
+.hub-case-chat .hub-messages { height: min(44vh, 420px); min-height: 200px; }
+
+/* 表单弹窗兼容独立模块工作台，不显示重复数据看板。 */
+.supply-hub.hub-case-chat { height: auto; min-height: 0; }
+.hub-case-chat .hub-module-board { display: none; }
+.hub-case-chat .hub-workspace { display: block; }
+.hub-case-chat .hub-chat { height: auto; }
+.hub-case-chat .hub-messages { flex: none; height: min(44vh, 420px); min-height: 200px; }
+
+/* 事实、查询与反馈分层展示；详情默认收起，保留用户展开和滚动位置。 */
+.hub-run-head,.hub-audit-meta{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}.hub-run-head{justify-content:space-between;border-bottom:1px solid #e0e9e4;padding-bottom:12px}.hub-run-head span{font-size:11px;color:#687b71}
+.hub-audit{margin:16px 0;border-left:2px solid #dce8e1;padding-left:16px}.hub-audit-event{position:relative;padding:0 0 17px}.hub-audit-event:before{content:'';position:absolute;left:-21px;top:7px;width:8px;height:8px;border-radius:50%;background:#99afa1}.hub-event-reply:before{background:#36795d}.hub-event-failed:before{background:#be664e}.hub-audit-meta{font-size:11px;color:#657c6f}.hub-audit-meta time{font-size:10px;color:#87998d}.hub-audit-event p{font-size:12px;line-height:1.7;margin:6px 0}.hub-audit-event details{border:0;margin:0;padding-top:2px}.hub-audit-event summary{cursor:pointer;color:#39765a;font-size:11px}.hub-audit-event pre{max-height:260px;overflow:auto;white-space:pre-wrap;font-size:11px}.hub-source{background:#f3f7f4;border-radius:8px;padding:10px;margin:8px 0}.hub-source small{display:block;line-height:1.7;color:#6e7e74}.hub-outcome{background:#edf5f0;padding:12px;border-radius:10px;font-size:12px}.hub-outcome p{white-space:pre-line;line-height:1.8}.hub-activity>details{margin:10px 0}.hub-activity .hub-audit{padding-left:12px}.hub-activity .hub-audit-event:before{left:-17px}

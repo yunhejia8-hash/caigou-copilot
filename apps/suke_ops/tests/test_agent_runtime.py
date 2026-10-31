@@ -96,3 +96,40 @@ class AgentRuntimeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class PreloadedAndBatchTests(unittest.TestCase):
+    def test_preloaded_facts_allow_one_model_request_without_fake_tool_use(self):
+        trace, seen = [], []
+        def provider(system, messages, specs):
+            seen.extend(messages)
+            return {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': 'Reviewed'}]}
+        result = respond('stock', 'Review', [], [], lambda *a: self.fail('No repeated query'), trace,
+                         provider=provider, initial_evidence={'read_at': 'now', 'stock': 220})
+        self.assertEqual(result, 'Reviewed')
+        self.assertIn('220', seen[-1]['content'])
+        self.assertEqual(len([r for r in trace if r['tool'] == 'model_request']), 1)
+        self.assertTrue(all(row['role'] == 'user' for row in seen[:2]))
+
+    def test_batch_validated_deduplicated_and_budget_reserved_before_execution(self):
+        spec = [schema('read', 'read', {'name': text_schema()}, ['name'])]
+        calls = [{'type': 'tool_use', 'id': str(i), 'name': 'read', 'input': {'name': value}}
+                 for i, value in enumerate(['a', 'b', 'a'])]
+        budget, batches = [3], []
+        def batch(module, requests):
+            self.assertEqual(budget[0], 0)
+            batches.append(requests)
+            return [{'value': args['name']} for name, args in requests]
+        def provider(system, messages, tools):
+            if len(messages) == 1:
+                return {'stop_reason': 'tool_use', 'content': calls}
+            self.assertEqual([row['tool_use_id'] for row in messages[-1]['content']], ['0', '1', '2'])
+            return {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': 'Done'}]}
+        respond('buying', 'Read', [], spec, lambda *a: self.fail('No serial dispatch'), [],
+                provider=provider, batch_dispatch=batch, tool_budget=budget)
+        self.assertEqual(len(batches[0]), 2)
+
+    def test_invalid_batch_never_reaches_parallel_dispatch(self):
+        output = {'content': [{'type': 'tool_use', 'id': 'a', 'name': 'forbidden', 'input': {}}]}
+        with self.assertRaises(RuntimeError):
+            respond('buying', 'Read', [], [], lambda *a: None, [], provider=lambda *a: output,
+                    batch_dispatch=lambda *a: self.fail('Unauthorized batch'))
