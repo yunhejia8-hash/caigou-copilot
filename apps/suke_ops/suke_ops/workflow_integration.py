@@ -26,7 +26,7 @@ def run():
         assert r['workflow']['phase']=='needs_info' and not r['application']['preview_url']
         checks.append('缺失字段时停在预审补充，不生成PDF或询价')
         with patch.object(flow.procurement_bridge,'run',side_effect=AssertionError('不能提前比价')):
-            application,r=step(TEXT+'\n\n'+QUOTE)
+            application,r=step(TEXT.replace('测试一号仓','流程验收仓-'+conversation[:8])+'\n\n'+QUOTE)
             wf=r['workflow'];assert wf['phase']=='awaiting_confirmation'
             assert wf['preflight']['state']=='review' and wf['preflight']['unit_price'] is None
             assert wf['pdf'] and r['application']['download_url']
