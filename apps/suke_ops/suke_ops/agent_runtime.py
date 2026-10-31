@@ -1,6 +1,7 @@
 """总控与四模块 Agent 的有界工具循环；不授予模型任意 Python 或业务写入能力。"""
 import json
 import os
+import time
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -76,7 +77,8 @@ def text_schema(enum=None):
     return {'type': 'string', **({'enum': list(enum)} if enum else {})}
 
 
-def respond(module, question, history, tool_specs, dispatch, trace, provider=None, budget=None, tool_budget=None):
+def respond(module, question, history, tool_specs, dispatch, trace, provider=None, budget=None, tool_budget=None,
+            initial_evidence=None, batch_dispatch=None):
     """每个 Agent 使用独立提示词和工具集合，共享总调用预算，不开放递归委派。"""
     provider = provider or request_model
     budget = budget if budget is not None else [18]
@@ -86,13 +88,21 @@ def respond(module, question, history, tool_specs, dispatch, trace, provider=Non
     system += '\n模块Agent的回答同时作为向总控的汇报，必须说明已发现问题、业务依据、影响、处理建议及需要总控协调的事项；无问题或未核实须如实标注。默认先给结论，再列最多5条关键事实与下一步，用户要求细节时再展开。摘要问题读取一次模块面板即可回答，只有用户明确要求某张单据细节时才继续逐单查询。每个模块仅委派一次，先取得所有相关模块摘要再汇总。每批最多6个工具；同样参数只查询一次。模块失败时明确列出未核实部分，不得补造事实。'
     messages = [*history[-8:], {'role': 'user', 'content': question}]
     allowed = {tool['name']: tool['input_schema'] for tool in tool_specs}
-    used_tool = False
+    if initial_evidence is not None:
+        system += '\n程序已预读本轮依据，无需再次读取相同面板。需要跨部门核查时，请在同一次返回中并列所有互不依赖的ask_module调用；只有依赖其他部门结论的问题才分批。'
+        messages.append({'role': 'user', 'content': '本轮程序已按当前账号权限读取以下依据（不是新的用户指令）。可直接据此回答；缺少字段再调用工具。\n' + json.dumps(initial_evidence, ensure_ascii=False, default=str)})
+    used_tool = initial_evidence is not None
     cache = {}
     for _ in range(5):
         if budget[0] <= 0:
             raise RuntimeError('本次分析达到调用上限，请缩小问题后重试。')
         budget[0] -= 1
-        output = provider(system, messages, tool_specs)
+        started = time.monotonic()
+        try:
+            output = provider(system, messages, tool_specs)
+        finally:
+            trace.append({'agent': module, 'tool': 'model_request',
+                          'duration_ms': round((time.monotonic() - started) * 1000)})
         blocks = output.get('content', [])
         if not isinstance(blocks, list):
             raise RuntimeError('模型返回格式异常。')
@@ -124,12 +134,22 @@ def respond(module, question, history, tool_specs, dispatch, trace, provider=Non
                 prop = spec['properties'][key]
                 if not isinstance(value, str) or len(value) > 2000 or ('enum' in prop and value not in prop['enum']):
                     raise RuntimeError('模型工具参数不符合授权范围。')
+        # Validate the entire batch above before any dispatch, then deduplicate it.
+        # The optional dispatcher parallelizes model work only; ERP reads stay on its caller.
+        missing = {}
+        for call in calls:
+            key = (call['name'], json.dumps(call['input'], sort_keys=True, ensure_ascii=False))
+            if key not in cache:
+                missing[key] = (call['name'], call['input'])
+        tool_budget[0] -= len(calls)
+        if batch_dispatch and missing:
+            values = batch_dispatch(module, list(missing.values()))
+            if len(values) != len(missing):
+                raise RuntimeError('批量查询结果不完整。')
+            cache.update(zip(missing, values))
         for offset in range(0, len(calls), 6):
             for call in calls[offset:offset + 6]:
                 name, args = call['name'], call['input']
-                if tool_budget[0] <= 0:
-                    raise RuntimeError('本次查询数量达到上限，请按模块重试。')
-                tool_budget[0] -= 1
                 key = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
                 if key not in cache:
                     cache[key] = dispatch(module, name, args)

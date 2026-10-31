@@ -90,3 +90,12 @@ test('business provenance card links actual source and keeps account meaning exp
  assert.ok(html.includes('data-docname="PO-1"'));assert.ok(html.includes('editor'));assert.ok(html.includes('账号不等于承诺人'));
  assert.equal(h.recordSource({result_excerpt:'{truncated',truncated:true}),'');
 });
+test('history restores evidence in one request instead of polling each old turn', async () => {
+ const {Hub} = environment(), h = Object.create(Hub.prototype), calls=[];
+ h.conversation='history';h.module='control';h.turns=[];
+ h.renderMessages=h.renderBusy=()=>{};
+ h.call=async(method,args)=>{calls.push(method);return [{name:'old',state:'done',events:[{kind:'evidence'}]}];};
+ h.host={find:()=>({text:()=>{}})};
+ await h.restore();
+ assert.deepEqual(calls,['history']);assert.equal(h.turns[0].events.length,1);assert.equal(h.restoring,false);
+});

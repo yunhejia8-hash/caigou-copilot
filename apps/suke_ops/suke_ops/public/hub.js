@@ -149,9 +149,6 @@ frappe.SupplyHub = class {
             const turns = await this.call('history', {conversation, module: this.module});
             if (conversation !== this.conversation) return;
             this.turns = turns;
-            for (const turn of this.turns) {
-                if (turn.state === 'done') Object.assign(turn, await this.call('poll', {name: turn.name}));
-            }
             this.renderMessages();
             const active = this.turns.find(turn => ['queued', 'running'].includes(turn.state));
             if (active) { this.busy = true; this.renderBusy(); this.watch(active); }
@@ -238,6 +235,7 @@ frappe.SupplyHub = class {
     }
     async refreshActivity() {
         clearTimeout(this.activityTimer);
+        if (this.host[0]?.closest?.('[hidden]')) return;
         try {
             const rows = await this.call('discussion_activity', {module: this.module});
             if (!this.host[0]?.isConnected) return;
@@ -249,7 +247,7 @@ frappe.SupplyHub = class {
                 area[0]?.querySelectorAll('details').forEach(el => {if (opened.has(el.dataset.auditKey)) el.open = true;});
             }
             if (this.busy || rows.some(row => ['running','queued'].includes(row.state))) this.activityTimer = setTimeout(() => {
-                if (this.host[0]?.isConnected) this.refreshActivity();
+                if (this.host[0]?.isConnected && !this.host[0]?.closest?.('[hidden]')) this.refreshActivity();
             }, 4000);
         } catch (_) { this.host.find('.hub-activity').html('<p>协同足迹读取失败，点击刷新可重试。</p>'); }
     }
@@ -263,8 +261,9 @@ frappe.SupplyHub = class {
             const completed = ['done', 'failed'].includes(turn.state);
             const replies = (turn.discussion || []).length;
             const summary = turn.answer || (turn.state === 'failed' ? '本次分析未完成，请检查记录后重试。' : '正在核对依据，反馈将逐步显示。');
+            const timing = turn.timing ? ` · ${(turn.timing.total_ms / 1000).toFixed(1)}秒 · ${turn.timing.model_calls}次模型请求` : '';
             return `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><div class="hub-run-head"><b>${turn.synthetic ? '合成场景 · 真实协作' : this.esc(this.names[turn.agent_module] || '总控') + ' Agent'}</b><span>${completed ? '本轮结束' : '正在协同'}${replies ? ' · ' + replies + '/10项反馈' : ''}</span></div>${turn.events?.length ? this.auditTrail(turn) : (turn.discussion || []).map((row,i) => `<details data-audit-key="legacy-${this.esc(turn.name)}-${i}"><summary>${this.esc(this.names[row.module])} · ${this.esc(row.phase)} · 待核实</summary><div class="hub-markdown">${this.answer(row.answer)}</div></details>`).join('')}
-            <div class="hub-outcome"><b>${completed ? '待你处理' : '当前状态'}</b><p>${this.esc(summary.length > 220 ? summary.slice(0,220) + '…' : summary)}</p>${summary.length > 220 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(summary)}</div></details>` : ''}</div>
+            <div class="hub-outcome"><b>${completed ? '待你处理' : '当前状态'}</b><small>${this.esc(timing)}</small><p>${this.esc(summary.length > 220 ? summary.slice(0,220) + '…' : summary)}</p>${summary.length > 220 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(summary)}</div></details>` : ''}</div>
             ${turn.synthetic ? '<p class="hub-table-note">模型反馈待核实；不自动采购、不释放预留。来源没有提供人时明确留空。</p>' : ''}
             ${turn.synthetic && turn.state === 'done' ? `<button type="button" data-add-evidence="${this.esc(turn.name)}">补充信息并复核</button>` : ''}
             ${(turn.offers || []).map((offer,index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">打开未保存草稿，仍需核对、审批。</p>' : ''}</article>`;
@@ -306,7 +305,7 @@ frappe.SupplyHub = class {
                 Object.assign(turn, result);
                 this.renderMessages();
                 if (['done', 'failed'].includes(turn.state)) break;
-                await new Promise(resolve => setTimeout(resolve, 2200));
+                await new Promise(resolve => setTimeout(resolve, 1200));
             }
             if (!['done', 'failed'].includes(turn.state)) turn.answer = '分析仍未结束，可稍后刷新页面查看。';
         } catch (_) { turn.answer = '状态读取失败，刷新页面可恢复对话。'; }
