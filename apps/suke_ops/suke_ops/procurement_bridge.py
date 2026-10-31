@@ -30,10 +30,13 @@ def demand_from(texts):
     return fields, ambiguities+invalid, engine
 
 
-def run(operation, texts):
+def run(operation, texts, fields=None):
     if operation not in ('procurement_intake','procurement_compare','procurement_search'):
         raise ValueError('未授权采购工具')
-    fields, errors, engine = demand_from(texts)
+    if fields is None:
+        fields, errors, engine = demand_from(texts)
+    else:
+        fields, errors, engine = dict(fields), [], "confirmed_application"
     required = [('quantity','需求数量'),('unit','计量单位'),('spec','规格'),('needed_by','要求到货日期')]
     missing = [label for key,label in required if not fields.get(key)]
     if not (fields.get('material_name') or fields.get('material_id')):

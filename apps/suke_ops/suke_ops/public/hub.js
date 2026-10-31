@@ -48,6 +48,10 @@ frappe.SupplyHub = class {
             const {doctype, docname} = event.currentTarget.dataset;
             frappe.set_route(docname ? ['Form', doctype, docname] : ['List', doctype]);
         });
+        this.host.on('click', '[data-start-comparison]', () => this.send('开始比价'));
+        this.host.on('click', '[data-confirm-application]', (event) => {
+            this.send('确认申请 ' + event.currentTarget.dataset.confirmApplication + ' 第' + event.currentTarget.dataset.revision + '版');
+        });
         this.host.on('click', '[data-draft]', async (event) => {
             const button = $(event.currentTarget);
             if (button.prop('disabled')) return;
@@ -164,14 +168,33 @@ frappe.SupplyHub = class {
             [['name', '订单'], [board.module === 'buying' ? 'supplier' : 'customer', board.module === 'buying' ? '供应商' : '客户'], [board.module === 'buying' ? 'schedule_date' : 'delivery_date', '交期'], [board.module === 'buying' ? 'per_received' : 'per_delivered', '完成 %'], ['status', '状态']];
         return `<div class="hub-section-label">${this.esc(board.label)}数据面板</div><h3>${stock ? '现存库存明细' : '未完成业务单据'}</h3>${!board.access ? '<p>当前账号没有读取权限。</p>' : !board.rows.length ? '<p>当前没有符合条件的数据。</p>' : `<div class="hub-table-scroll"><table><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join('')}</tr></thead><tbody>${board.rows.map(row => `<tr>${columns.map(([key]) => `<td>${key === 'name' ? this.link(board.doctype, row.name) : this.esc(row[key] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`}${stock ? '<p class="hub-table-note">现存量不等于可分配量；预计数量未区分交期，不能据此判断按时交付。请进入异常方案核对交期、冻结和预留归属。</p>' : ''}`;
     }
+    applicationCard(turn) {
+        const app = turn.application;
+        const latestTurn = [...this.turns].reverse().find(row => row.application);
+        if (!app?.preview_url || latestTurn?.name !== turn.name) return '';
+        const latest = [...this.turns].reverse().find(row => row.application)?.application;
+        const current = latest?.id === app.id && latest?.revision === app.revision;
+        const active = latest?.id === app.id && latest?.revision === app.revision && latest?.phase === 'awaiting_confirmation';
+        const safe = url => typeof url === 'string' && /^\/api\/method\/suke_ops\.procurement_workflow\.application_pdf\?/.test(url);
+        return `<section class="hub-application"><div><strong>采购需求申请表</strong><span>${this.esc(app.status)}</span></div><small>${this.esc(app.id)} · 第${Number(app.revision)}版</small><div class="hub-application-actions">${safe(app.preview_url) ? `<a href="${this.esc(app.preview_url)}" target="_blank" rel="noopener noreferrer">预览 PDF ↗</a>` : ''}${safe(app.download_url) ? `<a href="${this.esc(app.download_url)}">下载 PDF ↓</a>` : ''}${current && latest.phase === 'quotations_ready' ? '<button type="button" data-start-comparison>开始比价</button>' : ''}${active && safe(app.preview_url) ? `<button type="button" data-confirm-application="${this.esc(app.id)}" data-revision="${Number(app.revision)}">确认申请，进入询价</button>` : ''}</div></section>`;
+    }
+    procurementEvidence(turn) {
+        return (turn.procurement || []).map(entry => {
+            const result = entry.result || {};
+            if (result.quotes) return `<div class="hub-table-scroll"><table class="hub-quote-comparison"><thead><tr><th>供应商</th><th>含税到仓总额</th><th>待核对项</th></tr></thead><tbody>${result.quotes.map(row => `<tr><td>${this.esc(row.quote?.supplier || '待明确')}</td><td>${row.total === null ? '待明确' : '¥' + Number(row.total).toLocaleString('zh-CN',{minimumFractionDigits:2})}</td><td>${this.esc((row.issues || []).join('；') || '条件齐全')}</td></tr>`).join('')}</tbody></table></div>`;
+            if (result.sources) return `<details><summary>网上参考价与来源</summary><p>${this.esc(result.market_reference || '')}</p>${Object.entries(result.sources).filter(([url]) => /^https?:\/\//.test(url)).map(([url,title]) => `<a href="${this.esc(url)}" target="_blank" rel="noopener noreferrer">${this.esc(title)}</a>`).join('<br>')}</details>`;
+            return '';
+        }).join('');
+    }
     renderMessages() {
         const messages = this.host.find('.hub-messages');
-        messages.html(this.turns.length ? this.turns.map(turn => `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><small>${this.esc(this.names[turn.agent_module] || '总控')} Agent</small><div class="hub-markdown">${this.answer(turn.answer || (turn.state === 'failed' ? '分析未完成，请重试。' : '正在读取业务数据并协调相关模块…'))}</div>${(turn.offers || []).map((offer, index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">将打开未保存的原生表单，请核对数量、仓库和必填项后保存。</p>' : ''}</article>`).join('') : `<div class="hub-empty"><h2>${this.module === 'control' ? '查看模块上报，协调下一步' : this.names[this.module] + '有哪些问题需要处理？'}</h2></div>`);
+        messages.html(this.turns.length ? this.turns.map(turn => `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><small>${this.esc(this.names[turn.agent_module] || '总控')} Agent</small><div class="hub-markdown">${this.answer(turn.answer || (turn.state === 'failed' ? '分析未完成，请重试。' : '正在读取业务数据并协调相关模块…'))}</div>${this.applicationCard(turn)}${this.procurementEvidence(turn)}${(turn.offers || []).map((offer, index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">将打开未保存的原生表单，请核对数量、仓库和必填项后保存。</p>' : ''}</article>`).join('') : `<div class="hub-empty"><h2>${this.module === 'control' ? '查看模块上报，协调下一步' : this.names[this.module] + '有哪些问题需要处理？'}</h2></div>`);
         messages.scrollTop(messages[0].scrollHeight);
     }
     renderBusy() {
         this.host.find('.hub-send').prop('disabled', this.restoring || this.busy || !this.data?.model_ready).text(this.busy ? '分析中…' : '发送 ↑');
         this.host.find('.hub-new').prop('disabled', this.restoring || this.busy);
+        this.host.find('[data-confirm-application],[data-start-comparison]').prop('disabled',this.restoring || this.busy);
         this.host.find('[data-prompt]').prop('disabled', this.restoring || this.busy || !this.data?.model_ready);
     }
     async send(prompt) {

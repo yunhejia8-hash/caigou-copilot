@@ -406,6 +406,14 @@ def run_turn(name):
     module_results = []
     try:
         require_user()
+        if turn.agent_module in ('buying','buying-demand','buying-inquiry','buying-comparison'):
+            from suke_ops.procurement_workflow import process
+            workflow_result = process(turn)
+            if workflow_result is not None:
+                frappe.db.set_value('Agent Turn',name,{'state':'done','answer':workflow_result['answer'],
+                                    'result':json.dumps(workflow_result,ensure_ascii=False,default=str)})
+                frappe.db.commit()
+                return
         previous = frappe.get_all('Agent Turn', filters={'owner': turn.owner, 'conversation': turn.conversation,
                                  'state': 'done', 'agent_module': turn.agent_module, 'creation': ['<', turn.creation]}, fields=['question', 'answer'],
                                   order_by='creation desc', limit_page_length=4)
@@ -417,7 +425,9 @@ def run_turn(name):
         def dispatch(module, tool, args):
             if module in ('buying','buying-demand','buying-inquiry','buying-comparison') and tool in ('procurement_intake','procurement_compare','procurement_search'):
                 from suke_ops.procurement_bridge import run
+                from suke_ops.procurement_workflow import guard, previous_workflow
                 try:
+                    guard(previous_workflow(turn.conversation),tool)
                     value = run(tool, [row.question for row in reversed(previous)] + [turn.question])
                 except ValueError as error:
                     value = {'backend': 'ivvli/procurement-agent', 'errors': [str(error)]}
