@@ -1,0 +1,73 @@
+{
+  "status": "PASS",
+  "mode": "最终新站点真实模型收货草稿联调，仅合成数据",
+  "agent": "stock",
+  "question": "查看待到货采购单，帮我准备收货草稿。",
+  "answer": "**待到货采购单（2 张，均为“To Receive and Bill”，已收货比例 0%）**\n\n| 采购单 | 物料 | 数量 | 单价 | 收货仓库 | 行交期 |\n|---|---|---|---|---|---|\n| PUR-ORD-2026-00001 | SUKE-CONN-MAIN | 600 | 22.0 | Stores - SC | 2026-11-04 |\n| PUR-ORD-2026-00002 | SUKE-CONN-TEST | 600 | 22.0 | Stores - SC | 2026-11-04 |\n\n两张单均为供应商 SUKE-FLOW-演示供应商、金额 13,200.00 CNY；表头计划日为 2026-11-01，但行交期为 2026-11-04，两者不一致，收货时请以哪一方为准，需要你确认。\n\n**收货草稿入口（已生成，尚未创建任何单据）**\n- 从 PUR-ORD-2026-00001 准备收货草稿\n- 从 PUR-ORD-2026-00002 准备收货草稿\n\n点击后系统会重新校验源单版本和权限，草稿仍需你人工确认并保存；这不代表已保存、已审批或已入库。\n\n**相关库存现状（分开说明，不可混算）**\n- SUKE-CONN-MAIN：现存量 320、已锁定 120、账面预计 200\n- SUKE-CONN-TEST：现存量 320、已锁定 120、账面预计 200\n两者为不同物料，数量不可相加；现存量为 320 不代表 320 可用于分配，可分配量为 200。\n\n**下一步**：请你选择要打开哪一张（或两张）草稿，并确认按行交期 2026-11-04 还是表头 2026-11-01 收货；两批到货后的库存与已锁定预留是否需重新评估，可另行核对。",
+  "result": {
+    "trace": [
+      {
+        "agent": "stock",
+        "tool": "read_module_board",
+        "input": {}
+      },
+      {
+        "agent": "stock",
+        "tool": "list_records",
+        "input": {
+          "doctype": "Purchase Order"
+        }
+      },
+      {
+        "agent": "stock",
+        "tool": "read_record",
+        "input": {
+          "doctype": "Purchase Order",
+          "name": "PUR-ORD-2026-00002"
+        }
+      },
+      {
+        "agent": "stock",
+        "tool": "read_record",
+        "input": {
+          "doctype": "Purchase Order",
+          "name": "PUR-ORD-2026-00001"
+        }
+      },
+      {
+        "agent": "stock",
+        "tool": "offer_draft",
+        "input": {
+          "action": "receive_purchase",
+          "source": "PUR-ORD-2026-00001"
+        }
+      },
+      {
+        "agent": "stock",
+        "tool": "offer_draft",
+        "input": {
+          "action": "receive_purchase",
+          "source": "PUR-ORD-2026-00002"
+        }
+      }
+    ],
+    "offers": [
+      {
+        "action": "receive_purchase",
+        "source": "PUR-ORD-2026-00001",
+        "source_type": "Purchase Order",
+        "target_type": "Purchase Receipt",
+        "modified": "2026-10-31 09:19:25.996679",
+        "label": "从 PUR-ORD-2026-00001 准备收货草稿"
+      },
+      {
+        "action": "receive_purchase",
+        "source": "PUR-ORD-2026-00002",
+        "source_type": "Purchase Order",
+        "target_type": "Purchase Receipt",
+        "modified": "2026-10-31 09:21:33.367652",
+        "label": "从 PUR-ORD-2026-00002 准备收货草稿"
+      }
+    ]
+  }
+}

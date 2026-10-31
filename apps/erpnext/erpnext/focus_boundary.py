@@ -111,7 +111,26 @@ def initialize_demo(company_name='供应协同演示', abbr='SC'):
         if not frappe.db.exists('Price List', label):
             frappe.get_doc({'doctype': 'Price List', 'price_list_name': label, 'enabled': 1,
                             'buying': buying, 'selling': selling, 'currency': 'CNY'}).insert()
-    frappe.db.set_single_value('System Settings', {'setup_complete': 1, 'time_zone': 'Asia/Singapore', 'language': 'zh'})
+    settings = frappe.get_single('System Settings')
+    settings.update({'setup_complete': 1, 'time_zone': 'Asia/Singapore', 'language': 'zh'})
+    settings.save()
+    # 新建管理员先于演示设置创建，不能沿用上游默认时区显示业务时间。
+    frappe.defaults.set_global_default('time_zone', settings.time_zone)
+    administrator = frappe.get_doc('User', 'Administrator')
+    administrator.time_zone = settings.time_zone
+    administrator.save()
     frappe.defaults.set_global_default('focus_demo_initialized', '1')
     frappe.db.commit()
     return {'company': company.name, 'warehouse': warehouse}
+
+
+def complete_demo_setup():
+    """主数据和业务扩展均安装后才完成 Frappe 的应用级向导标记。"""
+    if not frappe.defaults.get_global_default('focus_demo_initialized'):
+        frappe.throw('演示主数据尚未初始化，不能完成站点设置。')
+    from frappe.desk.page.setup_wizard.setup_wizard import enable_setup_wizard_complete
+    for app in ('frappe', 'erpnext', 'suke_ops'):
+        enable_setup_wizard_complete(app)
+    frappe.clear_cache()
+    frappe.db.commit()
+    return {'setup_complete': frappe.is_setup_complete()}

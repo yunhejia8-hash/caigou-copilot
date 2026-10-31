@@ -1,0 +1,45 @@
+{
+  "status": "PASS",
+  "recorded_at": "2026-10-31T09:29:42.160564+08:00",
+  "project": "caigou-copilot",
+  "site": "focus.local",
+  "url": "http://127.0.0.1:8081/desk/buying/operations-hub",
+  "image_id": "sha256:34c1a91002dab42e3a7b2a1a1d0b575664708a5f13784de9c5447b0428bbda47",
+  "source_verification": {
+    "checked": 2926,
+    "mismatches": []
+  },
+  "defaults": {
+    "currency": "CNY",
+    "time_zone": "Asia/Singapore",
+    "global_time_zone": "Asia/Singapore",
+    "admin_time_zone": "Asia/Singapore",
+    "setup_complete": true
+  },
+  "checks": {
+    "source_and_deployment": 8,
+    "engine_and_runtime": 20,
+    "core_business": 21,
+    "simple_business": 7,
+    "hub_database": 11,
+    "static_assets_http": 56,
+    "realtime_origin_auth": 2
+  },
+  "ui": [
+    "登录后进入总控对话工作台",
+    "四模块数据面板及手动入口可见",
+    "真实库存 Agent 读取合成采购单并提供草稿入口",
+    "点击打开600件原生未保存采购入库单，人民币金额及仓库正确",
+    "最终工作台浏览器控制台无错误"
+  ],
+  "deployment_notes": [
+    "使用独立的新数据库和数据卷首次安装，原8080站点未迁移",
+    "页面验收发现并修复基础资源清单、同源轮询Origin和管理员时区问题；对应修复已纳入构建与首次初始化",
+    "真实模型验证仅使用用户明确授权的本次合成数据"
+  ],
+  "limits": [
+    "序列号和批次物料由原生手动流程创建；Agent草稿工具明确拒绝",
+    "实时自动检查覆盖握手鉴权边界，未测试登录后的业务广播消息",
+    "未连接真实供应商议价，未自动批准或提交业务单据"
+  ]
+}

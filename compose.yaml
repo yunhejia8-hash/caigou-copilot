@@ -1,7 +1,8 @@
-name: caigou-focus
+name: caigou-copilot
 x-app: &app
   image: caigou-copilot:focus
   build: .
+  restart: unless-stopped
   volumes:
     - sites:/home/frappe/frappe-bench/sites
     - logs:/home/frappe/frappe-bench/logs
@@ -14,6 +15,7 @@ x-app: &app
 services:
   db:
     image: mariadb:11.8
+    restart: unless-stopped
     environment:
       MARIADB_ROOT_PASSWORD: ${DB_PASSWORD:?先生成本地 .env}
     command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci, --skip-character-set-client-handshake, --innodb-snapshot-isolation=OFF]
@@ -26,12 +28,15 @@ services:
       retries: 30
   redis-cache:
     image: redis:6.2-alpine
+    restart: unless-stopped
   redis-queue:
     image: redis:6.2-alpine
+    restart: unless-stopped
     volumes:
       - redis-data:/data
   initialize:
     <<: *app
+    restart: "no"
     command: [python, /home/frappe/initialize_focus.py]
     environment:
       <<: *environment

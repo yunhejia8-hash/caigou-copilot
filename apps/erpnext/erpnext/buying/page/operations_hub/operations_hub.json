@@ -1,0 +1,9 @@
+{
+ "doctype": "Page",
+ "name": "operations-hub",
+ "page_name": "operations-hub",
+ "module": "Buying",
+ "standard": "Yes",
+ "title": "供应协同工作台",
+ "roles": []
+}

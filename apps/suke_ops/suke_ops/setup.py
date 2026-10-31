@@ -95,6 +95,9 @@ def install():
     user.save()
     from suke_ops.approval import install as install_approval
     install_approval()
+    from suke_ops.hub import install as install_hub
+    install_hub()
+    frappe.reload_doc('buying', 'page', 'operations_hub')
     customize_navigation()
     repair_existing_reservations()
     frappe.clear_cache()
@@ -147,7 +150,8 @@ def customize_navigation():
     for module, links in menus.items():
         links.insert(2, ('Operations Approval', '业务单据审批'))
         base = get_site_sidebar_layer(module)
-        desired = []
+        desired = [{'type': 'Link', 'label': '对话与数据面板', 'link_type': 'Page', 'link_to': 'operations-hub',
+                    'added': 1, 'hidden': 0, 'open_in_new_tab': 0, 'icon': 'message-circle'}]
         for target, label in links:
             matching = next((r for r in base if r.get('link_type') == 'DocType' and r.get('link_to') == target), None)
             desired.append({**matching, 'label': label, 'hidden': 0, 'child': 0, 'indent': 0, 'open_in_new_tab': 0} if matching else

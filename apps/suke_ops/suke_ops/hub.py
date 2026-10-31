@@ -1,0 +1,321 @@
+"""对话主页 API：真实业务面板、用户隔离会话、四模块 Agent 和待人工保存的草稿。"""
+import hashlib
+import json
+import uuid
+
+import frappe
+from frappe.utils import cint, flt, now_datetime, nowdate
+
+from suke_ops import agent_runtime as runtime
+
+MODULE_DOCS = {
+    'buying': ['Material Request', 'Request for Quotation', 'Supplier Quotation', 'Purchase Order', 'Supplier'],
+    'selling': ['Customer', 'Quotation', 'Sales Order', 'Delivery Note', 'Sales Invoice'],
+    'stock': ['Item', 'Warehouse', 'Bin', 'Stock Reservation Entry', 'Purchase Order', 'Purchase Receipt', 'Stock Entry', 'Stock Reconciliation', 'Quality Inspection'],
+    'manufacturing': ['BOM', 'Production Plan', 'Work Order', 'Job Card', 'Stock Entry'],
+}
+LABELS = {'Material Request': '采购申请', 'Request for Quotation': '询价', 'Supplier Quotation': '供应商报价',
+          'Purchase Order': '采购订单', 'Supplier': '供应商', 'Customer': '客户', 'Quotation': '销售报价',
+          'Sales Order': '销售订单', 'Delivery Note': '发货', 'Sales Invoice': '销售账单', 'Item': '物料',
+          'Warehouse': '仓库', 'Bin': '库存明细', 'Stock Reservation Entry': '库存预留', 'Purchase Receipt': '收货',
+          'Stock Entry': '出入库与调拨', 'Stock Reconciliation': '盘点', 'Quality Inspection': '质检',
+          'BOM': '物料清单', 'Production Plan': '生产计划', 'Work Order': '工单', 'Job Card': '工序执行'}
+SHARED_DOCS = ['Supply Case', 'Supply Decision', 'Operations Approval']
+FIELDS = ['name', 'modified', 'docstatus', 'status', 'title', 'supplier', 'customer', 'company', 'currency',
+          'grand_total', 'schedule_date', 'delivery_date', 'transaction_date', 'posting_date', 'per_received',
+          'per_delivered', 'production_item', 'qty', 'produced_qty', 'planned_start_date', 'item_code',
+          'warehouse', 'actual_qty', 'reserved_qty', 'reserved_stock', 'projected_qty', 'workflow_state']
+DRAFTS = {
+    'purchase_from_request': ('buying', 'Material Request', 'Purchase Order', 'erpnext.stock.doctype.material_request.material_request.make_purchase_order'),
+    'receive_purchase': ('stock', 'Purchase Order', 'Purchase Receipt', 'erpnext.buying.doctype.purchase_order.purchase_order.make_purchase_receipt'),
+    'deliver_sales': ('selling', 'Sales Order', 'Delivery Note', 'erpnext.selling.doctype.sales_order.sales_order.make_delivery_note'),
+    'finish_production': ('manufacturing', 'Work Order', 'Stock Entry', 'erpnext.manufacturing.doctype.work_order.work_order.make_stock_entry'),
+}
+
+
+def require_user():
+    if (frappe.session.user == 'Guest' or frappe.get_cached_value('User', frappe.session.user, 'user_type') != 'System User'
+            or not frappe.get_cached_value('User', frappe.session.user, 'enabled')):
+        frappe.throw('请用企业内部账号登录。', frappe.PermissionError)
+
+
+def check_module(module, control=False):
+    if module not in MODULE_DOCS and not (control and module == 'control'):
+        frappe.throw('模块不在授权范围。', frappe.PermissionError)
+
+
+def fields_for(doctype):
+    meta = frappe.get_meta(doctype)
+    return [field for field in FIELDS if not (doctype == 'Bin' and field == 'reserved_qty') and
+            (field in ('name', 'modified', 'docstatus') or
+             (meta.has_field(field) and not cint(meta.get_field(field).permlevel)))]
+
+
+def records(doctype, filters=None, limit=12):
+    if not frappe.has_permission(doctype, 'read'):
+        return []
+    return frappe.get_list(doctype, fields=fields_for(doctype), filters=filters or {},
+                           order_by='modified desc', limit_page_length=limit)
+
+
+def count(doctype, filters):
+    if not frappe.has_permission(doctype, 'read'):
+        return None
+    rows = frappe.get_list(doctype, fields=[{'COUNT': 'name', 'as': 'total'}], filters=filters)
+    return cint(rows[0].total) if rows else 0
+
+
+def module_board(module):
+    check_module(module)
+    if module in ('buying', 'selling'):
+        purchase = module == 'buying'
+        doctype = 'Purchase Order' if purchase else 'Sales Order'
+        progress, due = ('per_received', 'schedule_date') if purchase else ('per_delivered', 'delivery_date')
+        pending = {'docstatus': 1, 'status': ['not in', ['Closed', 'Cancelled']], progress: ['<', 100]}
+        late = {**pending, due: ['<', nowdate()]}
+        metrics = [{'label': '待收货订单' if purchase else '待交付订单', 'value': count(doctype, pending), 'unit': '单'},
+                   {'label': '已逾期订单', 'value': count(doctype, late), 'unit': '单'},
+                   {'label': '订单草稿', 'value': count(doctype, {'docstatus': 0}), 'unit': '单'}]
+        rows = records(doctype, pending)
+    elif module == 'manufacturing':
+        doctype = 'Work Order'
+        pending = {'docstatus': 1, 'status': ['not in', ['Completed', 'Stopped', 'Closed', 'Cancelled']]}
+        metrics = [{'label': '未完成工单', 'value': count(doctype, pending), 'unit': '单'},
+                   {'label': '生产中', 'value': count(doctype, {'docstatus': 1, 'status': 'In Process'}), 'unit': '单'},
+                   {'label': '待启动工单', 'value': count(doctype, {'docstatus': 1, 'status': 'Not Started'}), 'unit': '单'}]
+        rows = records(doctype, pending)
+    else:
+        doctype = 'Bin'
+        metrics = [{'label': '有现存量的物料仓位', 'value': count('Bin', {'actual_qty': ['>', 0]}), 'unit': '项'},
+                   {'label': '有效预留记录', 'value': count('Stock Reservation Entry', {'docstatus': 1, 'status': ['not in', ['Closed', 'Cancelled', 'Delivered', 'Consumed']]}), 'unit': '条'},
+                   {'label': '预计缺料仓位（未分交期）', 'value': count('Bin', {'projected_qty': ['<', 0]}), 'unit': '项'}]
+        rows = records('Bin', {'actual_qty': ['!=', 0]})
+    return {'module': module, 'label': runtime.MODULES[module], 'metrics': metrics, 'doctype': doctype,
+            'stock_meaning': 'Bin.reserved_stock 是实际锁定量；projected_qty 是未分交期的账面预计量，不代表按时可交付。精确交期缺口用 compare_supply_case。',
+            'rows': rows, 'row_limit': 12, 'access': frappe.has_permission(doctype, 'read'),
+            'links': [{'doctype': dt, 'label': LABELS[dt]} for dt in MODULE_DOCS[module]
+                      if dt != 'Bin' and frappe.has_permission(dt, 'read')]}
+
+
+@frappe.whitelist()
+def dashboard():
+    require_user()
+    return {'modules': [module_board(module) for module in MODULE_DOCS], 'at': str(now_datetime()),
+            'model_ready': runtime.configured(), 'cases': records('Supply Case', limit=6),
+            'approvals': records('Operations Approval', {'workflow_state': ['in', ['待审批', '已驳回']]}, 6),
+            'decisions': records('Supply Decision', {'workflow_state': ['in', ['待审批', '已驳回']]}, 6)}
+
+
+def install():
+    from suke_ops.setup import field
+    if not frappe.db.exists('DocType', 'Agent Turn'):
+        frappe.get_doc({'doctype': 'DocType', 'name': 'Agent Turn', 'module': 'Buying', 'custom': 1,
+                        'autoname': 'hash', 'fields': [
+                            field('conversation', '对话标识'), field('request_key', '请求标识', unique=1),
+                            field('agent_module', '负责模块'), field('question', '问题', 'Long Text'),
+                            field('state', '状态'), field('answer', '回答', 'Long Text'),
+                            field('result', '工具记录', 'Code', options='JSON')],
+                        # 普通 REST 只能读取自己的对话，写入限于下面的受控 API。
+                        'permissions': [{'role': 'Desk User', 'read': 1, 'if_owner': 1}]}).insert()
+    frappe.db.commit()
+
+
+def owned_turn(name):
+    require_user()
+    doc = frappe.get_doc('Agent Turn', name)
+    if doc.owner != frappe.session.user:
+        frappe.throw('只能访问自己的对话。', frappe.PermissionError)
+    return doc
+
+
+@frappe.whitelist(methods=['POST'])
+def start(question, module='control', conversation=None, request_id=None):
+    require_user()
+    check_module(module, control=True)
+    if not isinstance(question, str) or not question.strip() or len(question) > 2000:
+        frappe.throw('请输入 1–2000 字的问题。')
+    if not runtime.configured():
+        frappe.throw('尚未配置模型服务；面板和手动功能仍可使用。')
+    conversation = str(uuid.UUID(conversation)) if conversation else str(uuid.uuid4())
+    request_id = str(uuid.UUID(request_id)) if request_id else str(uuid.uuid4())
+    key = hashlib.sha256((frappe.session.user + ':' + request_id).encode()).hexdigest()
+    # 稳定的账号行锁让多标签页同时发送也只能创建一个进行中任务。
+    frappe.db.sql('select name from tabUser where name=%s for update', frappe.session.user)
+    existing = frappe.db.get_value('Agent Turn', {'request_key': key}, 'name')
+    if existing:
+        previous = owned_turn(existing)
+        return {'name': existing, 'conversation': previous.conversation}
+    # 每账号仅一项进行中的分析，防止连续点击耗尽模型及队列资源。
+    active = frappe.get_all('Agent Turn', filters={'owner': frappe.session.user, 'state': ['in', ['queued', 'running']]}, fields=['name', 'creation'])
+    for row in active:
+        if (now_datetime() - row.creation).total_seconds() < 960:
+            frappe.throw('上一条分析尚未完成，请稍候。')
+        frappe.db.set_value('Agent Turn', row.name, {'state': 'failed', 'answer': '分析超时，请重新发送。'})
+    doc = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation, 'request_key': key,
+                         'agent_module': module, 'question': question.strip(), 'state': 'queued'}).insert(ignore_permissions=True)
+    frappe.enqueue('suke_ops.hub.run_turn', queue='long', timeout=900, enqueue_after_commit=True,
+                   job_id='agent-' + doc.name, name=doc.name)
+    return {'name': doc.name, 'conversation': conversation}
+
+
+@frappe.whitelist()
+def poll(name):
+    doc = owned_turn(name)
+    return {'name': doc.name, 'state': doc.state, 'answer': doc.answer,
+            **(json.loads(doc.result or '{}') if doc.state == 'done' else {})}
+
+
+@frappe.whitelist()
+def history(conversation):
+    require_user()
+    conversation = str(uuid.UUID(conversation))
+    rows = frappe.get_list('Agent Turn', filters={'owner': frappe.session.user, 'conversation': conversation},
+                           fields=['name', 'question', 'answer', 'agent_module', 'state'],
+                           order_by='creation desc, name desc', limit_page_length=50)
+    return list(reversed(rows))
+
+
+def read_record(module, doctype, name):
+    if doctype not in MODULE_DOCS[module] + SHARED_DOCS:
+        frappe.throw('单据不属于该模块的工具范围。', frappe.PermissionError)
+    doc = frappe.get_doc(doctype, name)
+    doc.check_permission('read')
+    result = {field: doc.get(field) for field in fields_for(doctype)}
+    result['doctype'] = doctype
+    for table in ('items', 'required_items'):
+        if doc.meta.has_field(table) and not cint(doc.meta.get_field(table).permlevel):
+            item_fields = ['item_code', 'qty', 'stock_qty', 'rate', 'warehouse', 'schedule_date',
+                           'delivery_date', 'received_qty', 'delivered_qty', 'required_qty', 'consumed_qty', 'source_warehouse']
+            result[table] = [{key: row.get(key) for key in item_fields if row.meta.has_field(key)
+                              and not cint(row.meta.get_field(key).permlevel)} for row in doc.get(table)[:30]]
+            result[table + '_total'] = len(doc.get(table))
+    return result
+
+
+def draft_offer(module, action, source):
+    definition = DRAFTS.get(action)
+    if not definition or definition[0] != module:
+        frappe.throw('该模块不能调用此操作。', frappe.PermissionError)
+    _, source_type, target_type, _ = definition
+    doc = frappe.get_doc(source_type, source)
+    doc.check_permission('read')
+    if not frappe.has_permission(target_type, 'create'):
+        frappe.throw('没有创建目标单据的权限。', frappe.PermissionError)
+    if doc.docstatus != 1 or doc.get('status') in ('Closed', 'Cancelled', 'Stopped', 'Completed'):
+        frappe.throw('源单据不是可继续履约的已提交单据。')
+    # 上游序列号/批次映射会提前插入 Bundle；这些场景保留原生手动流程，
+    # 不把有落库副作用的映射包装成只读草稿。
+    items = {row.item_code for table in ('items', 'required_items') for row in (doc.get(table) or [])}
+    if doc.get('production_item'):
+        items.add(doc.production_item)
+    for item in items:
+        tracking = frappe.get_cached_value('Item', item, ['has_serial_no', 'has_batch_no'])
+        if tracking and any(tracking):
+            frappe.throw('包含序列号或批次物料，请从原始单据使用手动创建功能，避免提前生成批次记录。')
+    return {'action': action, 'source': source, 'source_type': source_type, 'target_type': target_type,
+            'modified': str(doc.modified), 'label': '从 ' + source + ' 准备' + LABELS[target_type] + '草稿'}
+
+
+def module_tools(module):
+    return [runtime.schema('read_module_board', '读取当前账号可见的模块指标和最近12笔未完成单据', {}),
+            runtime.schema('list_records', '列出指定类型最近12笔单据；不是全部记录',
+                           {'doctype': runtime.text_schema(MODULE_DOCS[module] + SHARED_DOCS)}, ['doctype']),
+            runtime.schema('read_record', '读取指定单据摘要及最多30行物料',
+                           {'doctype': runtime.text_schema(MODULE_DOCS[module] + SHARED_DOCS), 'name': runtime.text_schema()}, ['doctype', 'name']),
+            runtime.schema('compare_supply_case', '调用程序计算现存、锁定、待确认供货及销售/生产两方案',
+                           {'name': runtime.text_schema()}, ['name']),
+            runtime.schema('offer_draft', '仅建议打开原生未保存草稿；用户点击后重新校验源版本和权限，不会自动保存或提交',
+                           {'action': runtime.text_schema([key for key, value in DRAFTS.items() if value[0] == module]),
+                            'source': runtime.text_schema()}, ['action', 'source'])]
+
+
+def run_turn(name):
+    # 从服务器记录恢复真实调用人，绝不接收模型指定的用户身份。
+    frappe.db.sql('select name from `tabAgent Turn` where name=%s for update', name)
+    turn = frappe.get_doc('Agent Turn', name)
+    if turn.state != 'queued':
+        frappe.db.commit()
+        return
+    frappe.set_user(turn.owner)
+    frappe.db.set_value('Agent Turn', name, 'state', 'running')
+    frappe.db.commit()
+    trace, offers, budget = [], [], [18]
+    try:
+        require_user()
+        previous = frappe.get_all('Agent Turn', filters={'owner': turn.owner, 'conversation': turn.conversation,
+                                 'state': 'done', 'creation': ['<', turn.creation]}, fields=['question', 'answer'],
+                                  order_by='creation desc', limit_page_length=4)
+        messages = [message for row in reversed(previous) for message in
+                    ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
+
+        def dispatch(module, tool, args):
+            if module == 'control' and tool == 'ask_module':
+                target = args['module']
+                answer = runtime.respond(target, args['question'], [], module_tools(target), dispatch, trace, budget=budget)
+                return {'module': target, 'answer': answer}
+            if module not in MODULE_DOCS:
+                frappe.throw('未知模块。', frappe.PermissionError)
+            if tool == 'read_module_board':
+                return module_board(module)
+            if tool == 'list_records':
+                if args['doctype'] not in MODULE_DOCS[module] + SHARED_DOCS:
+                    frappe.throw('单据越权。', frappe.PermissionError)
+                return {'rows': records(args['doctype']), 'limit': 12}
+            if tool == 'read_record':
+                return read_record(module, **args)
+            if tool == 'compare_supply_case':
+                from suke_ops.api import get_analysis
+                result = get_analysis(args['name'])
+                result.pop('agent', None)
+                return result
+            if tool == 'offer_draft':
+                offer = draft_offer(module, **args)
+                if offer not in offers:
+                    offers.append(offer)
+                return {**offer, 'state': '待用户打开，尚未创建单据'}
+            frappe.throw('未授权工具。', frappe.PermissionError)
+
+        specs = [runtime.schema('ask_module', '委派任务给指定业务 Agent，必要时依次询问多个模块',
+                                {'module': runtime.text_schema(MODULE_DOCS), 'question': runtime.text_schema()}, ['module', 'question'])] \
+            if turn.agent_module == 'control' else module_tools(turn.agent_module)
+        answer = runtime.respond(turn.agent_module, turn.question, messages, specs, dispatch, trace, budget=budget)
+        frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
+                            'result': json.dumps({'trace': trace, 'offers': offers}, ensure_ascii=False, default=str)})
+    except Exception as error:
+        frappe.db.rollback()
+        frappe.db.set_value('Agent Turn', name, {'state': 'failed',
+                            'answer': ('本轮分析未完成：' + str(error) if type(error) is RuntimeError else
+                                       '本轮分析未完成：请检查业务权限或问题范围后重试。') + ' 业务单据未由 Agent 保存或提交。',
+                            'result': json.dumps({'error_type': type(error).__name__, 'trace': trace}, ensure_ascii=False)})
+    frappe.db.commit()
+
+
+@frappe.whitelist(methods=['POST'])
+def open_draft(name, index):
+    turn = owned_turn(name)
+    if turn.state != 'done':
+        frappe.throw('分析尚未完成。')
+    offers = json.loads(turn.result or '{}').get('offers', [])
+    index = cint(index)
+    if index < 0 or index >= len(offers):
+        frappe.throw('草稿入口无效。')
+    offer = offers[index]
+    module, _, _, method = DRAFTS[offer['action']]
+    current = draft_offer(module, offer['action'], offer['source'])
+    if current['modified'] != offer['modified']:
+        frappe.throw('源单据已变化，请让 Agent 重新读取后准备草稿。')
+    if offer['action'] == 'finish_production':
+        wo = frappe.get_doc('Work Order', offer['source'])
+        qty = flt(wo.qty) - flt(wo.produced_qty)
+        if qty <= 0:
+            frappe.throw('没有剩余完工数量。')
+        doc = frappe.get_attr(method)(wo.name, 'Manufacture', qty=qty)
+    else:
+        doc = frappe.get_attr(method)(offer['source'])
+    if isinstance(doc, dict):
+        doc = frappe.get_doc(doc)
+    doc.check_permission('create')
+    # 只返回原生映射数据；由用户在表单检查必填项并保存，不写入 ERP 单据。
+    doc.name = None
+    doc.set('__islocal', 1)
+    return doc.as_dict()

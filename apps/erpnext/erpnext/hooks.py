@@ -108,7 +108,7 @@ app_description = '采购、销售、库存、生产'
 
 app_email = 'maintainer@example.invalid'
 
-app_home = '/desk/buying'
+app_home = '/desk/buying/operations-hub'
 
 after_install = 'erpnext.focus_boundary.after_install'
 
@@ -127,7 +127,7 @@ code_only_modules = {'Accounts': ['Buying', 'Selling'],
 add_to_apps_screen = [{'name': 'erpnext',
   'title': '供应协同',
   'logo': '/assets/erpnext/images/erpnext-logo.svg',
-  'route': '/desk/buying',
+  'route': '/desk/buying/operations-hub',
   'has_permission': 'erpnext.check_app_permission'}]
 
 doc_events = {'*': {'before_validate': 'erpnext.focus_boundary.validate_scope'},

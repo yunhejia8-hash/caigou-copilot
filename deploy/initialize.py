@@ -24,6 +24,8 @@ def main():
     run('set-config', '-g', 'redis_queue', 'redis://redis-queue:6379')
     run('set-config', '-g', 'redis_socketio', 'redis://redis-queue:6379')
     run('set-config', '-gp', 'socketio_port', '9000')
+    run('set-config', '-g', 'webserver_host', 'http://backend')
+    run('set-config', '-gp', 'webserver_port', '8000')
     if not Path('sites', site, 'site_config.json').exists():
         run('new-site', site, '--mariadb-user-host-login-scope=%',
             '--db-root-password', os.environ['DB_PASSWORD'],
@@ -37,6 +39,8 @@ def main():
     run('--site', site, 'execute', 'erpnext.focus_boundary.initialize_demo')
     run('--site', site, 'execute', 'suke_ops.setup.install')
     run('--site', site, 'execute', 'suke_ops.seed.create_case')
+    run('--site', site, 'execute', 'erpnext.focus_boundary.complete_demo_setup')
+    run('--site', site, 'enable-scheduler')
     run('--site', site, 'clear-cache')
 
 

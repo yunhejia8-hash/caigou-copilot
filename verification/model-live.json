@@ -1,0 +1,162 @@
+{
+  "status": "PASS",
+  "mode": "真实 DeepSeek 模型与真实合成ERP数据；只读分析",
+  "provider_host": "api.deepseek.com",
+  "agents": [
+    "buying",
+    "control",
+    "manufacturing",
+    "selling",
+    "stock"
+  ],
+  "tool_calls": 21,
+  "trace": [
+    {
+      "agent": "buying",
+      "tool": "read_module_board",
+      "input": {}
+    },
+    {
+      "agent": "buying",
+      "tool": "list_records",
+      "input": {
+        "doctype": "Material Request"
+      }
+    },
+    {
+      "agent": "buying",
+      "tool": "list_records",
+      "input": {
+        "doctype": "Request for Quotation"
+      }
+    },
+    {
+      "agent": "buying",
+      "tool": "list_records",
+      "input": {
+        "doctype": "Supplier Quotation"
+      }
+    },
+    {
+      "agent": "buying",
+      "tool": "list_records",
+      "input": {
+        "doctype": "Supply Case"
+      }
+    },
+    {
+      "agent": "buying",
+      "tool": "compare_supply_case",
+      "input": {
+        "name": "SUP-CASE-00001"
+      }
+    },
+    {
+      "agent": "buying",
+      "tool": "compare_supply_case",
+      "input": {
+        "name": "SUP-CASE-00002"
+      }
+    },
+    {
+      "agent": "control",
+      "tool": "ask_module",
+      "input": {
+        "module": "buying",
+        "question": "请读取采购模块面板，简述当前采购情况（在途采购、待确认供货、供应商议价/报价等关键信息，含实际单号）。不要创建或提交任何单据。"
+      }
+    },
+    {
+      "agent": "selling",
+      "tool": "read_module_board",
+      "input": {}
+    },
+    {
+      "agent": "control",
+      "tool": "ask_module",
+      "input": {
+        "module": "selling",
+        "question": "请读取销售模块面板，简述当前销售情况（未交订单、销售需求、预留占用等关键信息，含实际单号）。不要创建或提交任何单据。"
+      }
+    },
+    {
+      "agent": "stock",
+      "tool": "read_module_board",
+      "input": {}
+    },
+    {
+      "agent": "stock",
+      "tool": "list_records",
+      "input": {
+        "doctype": "Stock Reservation Entry"
+      }
+    },
+    {
+      "agent": "stock",
+      "tool": "list_records",
+      "input": {
+        "doctype": "Purchase Order"
+      }
+    },
+    {
+      "agent": "stock",
+      "tool": "list_records",
+      "input": {
+        "doctype": "Supply Case"
+      }
+    },
+    {
+      "agent": "stock",
+      "tool": "compare_supply_case",
+      "input": {
+        "name": "SUP-CASE-00001"
+      }
+    },
+    {
+      "agent": "stock",
+      "tool": "compare_supply_case",
+      "input": {
+        "name": "SUP-CASE-00002"
+      }
+    },
+    {
+      "agent": "control",
+      "tool": "ask_module",
+      "input": {
+        "module": "stock",
+        "question": "请读取库存模块面板，简述当前库存情况，请把库存现存量、已锁定量、可分配量、未确认供货分别列明（含物料与关键单号）。不要创建或提交任何单据。"
+      }
+    },
+    {
+      "agent": "manufacturing",
+      "tool": "read_module_board",
+      "input": {}
+    },
+    {
+      "agent": "manufacturing",
+      "tool": "read_record",
+      "input": {
+        "doctype": "Work Order",
+        "name": "MFG-WO-2026-00001"
+      }
+    },
+    {
+      "agent": "manufacturing",
+      "tool": "read_record",
+      "input": {
+        "doctype": "Work Order",
+        "name": "MFG-WO-2026-00002"
+      }
+    },
+    {
+      "agent": "control",
+      "tool": "ask_module",
+      "input": {
+        "module": "manufacturing",
+        "question": "请读取生产模块面板，简述当前生产情况（生产订单进度、缺料、待完工等关键信息，含实际单号）。不要创建或提交任何单据。"
+      }
+    }
+  ],
+  "answer": "## 四模块面板汇总（数据截至 2026-10-31 09:00，本轮只读取，未创建/提交任何单据）\n\n**采购（buying）**\n- 在途采购 2 单，已逾期 0，草稿 0：PUR-ORD-2026-00001（SUKE-CONN-MAIN 600）、PUR-ORD-2026-00002（SUKE-CONN-TEST 600），均为“已确认供货”，确认到仓 2026-11-04 08:00，晚于交期 11-01。\n- 采购申请 MAT-MR-2026-00001/-00002 已转采购，无待处理。\n- 询价/报价均无记录，无可比价数据。\n- 未确认供货：SUP-CASE-00001、SUP-CASE-00002 各 200 件提前供货，ETA 11-01 07:00，仅属“可能供货”，不计入可用。\n\n**销售（selling）**\n- 待交付 6 单（SAL-ORD-2026-00001～00006），逾期 0，草稿 0，交付日均为 11-01，已交付 0%，合计 44,700 CNY，同一演示客户。\n- 面板不含预留占用与可用量数据，销售侧无法自行判断交付可行性。\n\n**库存（stock）**\n| 物料 | 现存量 | 已锁定量 | 可分配量 | 未确认供货 |\n|---|---|---|---|---|\n| SUKE-CONN-MAIN | 320 | 120（MAT-SRE-2026-00001，对应 SAL-ORD-2026-00002） | 200 | 200（ETA 11-01 07:00） |\n| SUKE-CONN-TEST | 320 | 120（MAT-SRE-2026-00002，对应 SAL-ORD-2026-00005） | 200 | 200（ETA 11-01 07:00） |\n\n**生产（manufacturing）**\n- 未完成工单 2 单，生产中 0，待启动 2：MFG-WO-2026-00001 / -00002，各 150 台，已完工 0，计划 11-01 08:00 开工，各需连接件 300。\n- 生产侧未取库存数据，齐套情况不能自行判定。\n\n**需负责人决策的冲突（两物料结构相同，缺口均由程序计算为 400）**\n- 需求：重点客户 300（SAL-ORD-2026-00001 / -00004）、普通订单 120（已锁定）、工单 300。\n- 方案A 优先保销售：可分配 200 全给重点客户，仍缺 100；工单缺 300，无法开工。\n- 方案B 优先保生产：200 给工单，可开工 100 台仍缺 100；重点客户 300 全缺。\n- 现有 120 件预留保持原归属，我未选择、未批准、未释放预留。\n\n**下一步**\n1. 请负责人就 SUP-CASE-00001、SUP-CASE-00002 各给出“保销售/保生产”取舍，我再按决定推进。\n2. 向供应商确认每案 200 件提前至 11-01 是否成立，并跟踪两张采购单能否提前。\n3. 如走议价，需新开 RFQ（当前无单据），且议价仅为模拟供应商，须人工开草稿后方可推进。",
+  "turn": "tq7iqmg95c"
+}
