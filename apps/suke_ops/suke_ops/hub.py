@@ -262,7 +262,7 @@ def dashboard(module='control', view='chat'):
 @frappe.whitelist()
 def chat_status():
     require_user()
-    return {'model_ready': runtime.configured()}
+    return {'model_ready': runtime.configured(), 'client_version': 'procurement-approval-v1'}
 
 
 def install():
@@ -288,13 +288,22 @@ def owned_turn(name):
 
 
 @frappe.whitelist(methods=['POST'])
-def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, scenario_update=None, priority_order=None, priority_reason=None):
+def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, scenario_update=None, priority_order=None, priority_reason=None, quote_image=None, client_version=None):
     require_user()
     check_module(module, control=True)
+    if getattr(getattr(frappe, 'request', None), 'method', None) == 'POST' and client_version != 'procurement-approval-v1':
+        frappe.throw('工作台已更新，请刷新页面后再发送；本次未创建任务，输入内容已保留。')
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
         frappe.throw('请输入 1–2000 字的问题。')
     if not runtime.configured():
         frappe.throw('尚未配置模型服务；面板和手动功能仍可使用。')
+    if quote_image:
+        from suke_ops.procurement_images import validate_upload
+        from suke_ops.procurement_workflow import previous_workflow, guard
+        if module not in ('buying','buying-demand','buying-inquiry','buying-comparison'):
+            frappe.throw('请在采购询价对话中发送图片。')
+        guard(previous_workflow(conversation), 'procurement_search')
+        validate_upload(quote_image)
     scenario, inherited_policy = None, None
     manual_priority = priority_order is not None or priority_reason is not None
     if manual_priority and (human_note or scenario_update):
@@ -370,7 +379,7 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         frappe.db.set_value('Agent Turn', row.name, {'state': 'failed', 'answer': '分析超时，请重新发送。'})
     doc = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation, 'request_key': key,
                          'agent_module': module, 'question': question.strip(), 'state': 'queued',
-                         'result': json.dumps({'scenario': scenario, **priority_state}, ensure_ascii=False) if scenario else None}).insert(ignore_permissions=True)
+                         'result': json.dumps({'scenario': scenario, 'quote_image': quote_image, **priority_state}, ensure_ascii=False) if scenario or quote_image else None}).insert(ignore_permissions=True)
     frappe.enqueue('suke_ops.hub.run_turn', queue='long', timeout=900, enqueue_after_commit=True,
                    job_id='agent-' + doc.name, name=doc.name)
     return {'name': doc.name, 'conversation': conversation, 'synthetic': bool(scenario),
@@ -503,6 +512,10 @@ def module_tools(module):
                            {'doctype': runtime.text_schema(AGENT_DOCS[module] + SHARED_DOCS), 'name': runtime.text_schema()}, ['doctype', 'name']),
             runtime.schema('compare_supply_case', '调用程序计算现存、锁定、待确认供货及销售/生产两方案',
                            {'name': runtime.text_schema()}, ['name'])]
+    if module in ('buying','buying-demand','buying-inquiry','buying-comparison'):
+        specs += [runtime.schema('procurement_intake', '调用用户procurement-agent仓库的需求提取和字段校验，直接读取本人的会话原文；缺失项在原对话追问，不创建单据', {}),
+                  runtime.schema('procurement_compare', '调用用户仓库的报价提取、规格单位税运交期核对和到仓金额比较；直接读取本人最近报价原文，无需模型传入数字。无综合评分。', {}),
+                  runtime.schema('procurement_search', '用户要求联网询价时调用原仓库搜索服务，只发送物料规格数量单位并返回来源；不发送姓名预算，不作供应商承诺', {})]
     if module == 'buying':
         specs.append(runtime.schema('read_procurement_progress', '读取采购六环节的进度和专项Agent最新汇报', {}))
     actions = [key for key in DRAFTS if module in draft_modules(key)]
@@ -551,13 +564,33 @@ def run_turn(name):
                                 'result': json.dumps(result, ensure_ascii=False)})
             frappe.db.commit()
             return
+        if turn.agent_module in ('buying','buying-demand','buying-inquiry','buying-comparison'):
+            from suke_ops.procurement_workflow import process
+            workflow_result = process(turn)
+            if workflow_result is not None:
+                frappe.db.set_value('Agent Turn',name,{'state':'done','answer':workflow_result['answer'],
+                                    'result':json.dumps(workflow_result,ensure_ascii=False,default=str)})
+                frappe.db.commit()
+                return
         previous = frappe.get_all('Agent Turn', filters={'owner': turn.owner, 'conversation': turn.conversation,
                                  'state': 'done', 'agent_module': turn.agent_module, 'creation': ['<', turn.creation]}, fields=['question', 'answer', 'result'],
                                   order_by='creation desc', limit_page_length=4)
         messages = [message for row in reversed(previous) if not json.loads(row.result or '{}').get('synthetic') for message in
                     ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
 
+        procurement_evidence = []
+
         def execute_tool(module, tool, args):
+            if module in ('buying','buying-demand','buying-inquiry','buying-comparison') and tool in ('procurement_intake','procurement_compare','procurement_search'):
+                from suke_ops.procurement_bridge import run
+                from suke_ops.procurement_workflow import guard, previous_workflow
+                try:
+                    guard(previous_workflow(turn.conversation),tool)
+                    value = run(tool, [row.question for row in reversed(previous)] + [turn.question])
+                except ValueError as error:
+                    value = {'backend': 'ivvli/procurement-agent', 'errors': [str(error)]}
+                procurement_evidence.append({'tool': tool, 'result': value})
+                return value
             if tool == 'report_action':
                 if not args['reason'].strip() or not args['next_step'].strip():
                     raise RuntimeError('行动结果缺少具体原因或下一步。')
@@ -758,7 +791,7 @@ def run_turn(name):
         if documents:
             answer += '\n\n物料需求单：' + '、'.join(row['name'] + ('（复用已有单据）' if row['reused'] else '（已保存，未提交）') for row in documents)
         frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
-                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'events': events, 'action': action, 'documents': documents,
+                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'procurement': procurement_evidence, 'events': events, 'action': action, 'documents': documents,
                                 'timing': {'total_ms': round((time.monotonic()-run_started)*1000),
                                            'model_calls': sum(row.get('tool') == 'model_request' for row in trace)}}, ensure_ascii=False, default=str)})
     except Exception as error:

@@ -43,7 +43,8 @@
                 fallbackConversation = conversation;
                 try { sessionStorage.setItem(key, conversation); } catch (_) { /* 不在浏览器存储业务内容 */ }
                 // 不取消已提交的 start 请求，确保取得任务编号，避免停止后盲目重复创建任务。
-                const turn = await call('start', {question: message, module: 'control', conversation, request_id: crypto.randomUUID()});
+                const turn = await call('start', {question: message, module: 'control', conversation, request_id: crypto.randomUUID(),
+                    ...(typeof status.client_version === 'string' ? {client_version: status.client_version} : {})});
                 pending = turn.name;
                 pendingAt = Date.now();
                 aborted(signal);

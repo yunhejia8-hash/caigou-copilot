@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/ivvli/procurement-agent",
+  "base_commit": "275a3e31db8a27376a6da5ec8d0056f9acc5d8a7",
+  "source": "local working copy (includes previously verified search fixes)",
+  "changes": "Only internal imports made package-relative. No env, database, or UI copied.",
+  "files": {
+    "app.py": "9114bc082ab0c87114eca4e8ec5d336a5d8732989e078c6c4192a903a147b813",
+    "chat_service.py": "1802ed54b19fe884638e7993893cade686e8fa5d0d484b4ab0de74faf620dc97",
+    "procurement.py": "8898f0d803a237c051d5b1d9c2f6c3c7f5da11a79aa79b5ff124341fd42fd012",
+    "local_config.py": "4efaff4c5b6c2956e539094b2e67756fabbdf32a94c2fa91a295d26309f5e416"
+  }
+}

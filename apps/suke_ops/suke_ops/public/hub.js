@@ -90,6 +90,24 @@ frappe.SupplyHub = class {
             this.onNavigate();
             frappe.set_route(docname ? ['Form', doctype, docname] : ['List', doctype]);
         });
+        this.host.on('click', '[data-quote-image]', () => {
+            if (this.busy || this.restoring) return;
+            const conversation = this.conversation;
+            const module = this.module;
+            new frappe.ui.FileUploader({
+                allow_multiple: false, make_attachments_public: false,
+                disable_file_browser: true, allow_web_link: false,
+                restrictions: {allowed_file_types: ['.png', '.jpg', '.jpeg', '.webp'], max_file_size: 10 * 1024 * 1024},
+                on_success: file => {
+                    if (conversation !== this.conversation || module !== this.module) return frappe.msgprint('对话已切换，请在原询价对话重新选择图片。');
+                    this.send('识别询价图片', {quote_image: file.name});
+                }
+            });
+        });
+        this.host.on('click', '[data-start-comparison]', () => this.send('开始比价'));
+        this.host.on('click', '[data-confirm-application]', (event) => {
+            this.send('确认申请 ' + event.currentTarget.dataset.confirmApplication + ' 第' + event.currentTarget.dataset.revision + '版');
+        });
         this.host.on('click', '[data-draft]', async (event) => {
             const button = $(event.currentTarget);
             if (button.prop('disabled')) return;
@@ -216,6 +234,24 @@ frappe.SupplyHub = class {
             board.module === 'manufacturing' ? [['name', '工单'], ['production_item', '产品'], ['qty', '计划数量'], ['produced_qty', '已完工'], ['planned_start_date', '计划开工'], ['status', '状态']] :
             [['name', '订单'], [board.module === 'buying' ? 'supplier' : 'customer', board.module === 'buying' ? '供应商' : '客户'], [board.module === 'buying' ? 'schedule_date' : 'delivery_date', '交期'], [board.module === 'buying' ? 'per_received' : 'per_delivered', '完成 %'], ['status', '状态']];
         return `<div class="hub-section-label">${this.esc(board.label)}数据面板</div><h3>${stock ? '现存库存明细' : '未完成业务单据'}</h3>${!board.access ? '<p>当前账号没有读取权限。</p>' : !board.rows.length ? '<p>当前没有符合条件的数据。</p>' : `<div class="hub-table-scroll"><table><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join('')}</tr></thead><tbody>${board.rows.map(row => `<tr>${columns.map(([key]) => `<td>${key === 'name' ? this.link(board.doctype, row.name) : this.esc(row[key] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`}${stock ? '<p class="hub-table-note">现存量不等于可分配量；预计数量未区分交期，不能据此判断按时交付。请进入异常方案核对交期、冻结和预留归属。</p>' : ''}`;
+    }
+    applicationCard(turn) {
+        const app = turn.application;
+        const latestTurn = [...this.turns].reverse().find(row => row.application);
+        if (!app?.preview_url || latestTurn?.name !== turn.name) return '';
+        const latest = [...this.turns].reverse().find(row => row.application)?.application;
+        const current = latest?.id === app.id && latest?.revision === app.revision;
+        const active = latest?.id === app.id && latest?.revision === app.revision && latest?.phase === 'awaiting_confirmation';
+        const safe = url => typeof url === 'string' && /^\/api\/method\/suke_ops\.procurement_workflow\.application_pdf\?/.test(url);
+        return `<section class="hub-application"><div><strong>采购需求申请表</strong><span>${this.esc(app.approval?.label || ({inquiry:'申请已确认 · 询价中',quotations_ready:'申请已确认 · 报价待核对',compared:'申请已确认 · 比价完成'})[app.phase] || app.status)}</span></div><small>${this.esc(app.id)} · 第${Number(app.revision)}版 · 收货仓尚未核实ERP主数据</small>${app.approval ? `<p>${this.esc(app.approval.basis)}：¥${Number(app.approval.amount).toLocaleString('zh-CN', {minimumFractionDigits:2,maximumFractionDigits:2})} · 超过 ¥100,000 需人工审核</p>` : ''}<div class="hub-application-actions">${safe(app.preview_url) ? `<a href="${this.esc(app.preview_url)}" target="_blank" rel="noopener noreferrer">预览 PDF ↗</a>` : ''}${safe(app.download_url) ? `<a href="${this.esc(app.download_url)}">下载 PDF ↓</a>` : ''}${current && ['inquiry','quotations_ready','compared'].includes(latest.phase) ? '<button type="button" data-quote-image>发送报价图片</button>' : ''}${current && ['quotations_ready','compared'].includes(latest.phase) ? '<button type="button" data-start-comparison>开始比价</button>' : ''}${active && safe(app.preview_url) ? `<button type="button" data-confirm-application="${this.esc(app.id)}" data-revision="${Number(app.revision)}">确认申请，进入询价</button>` : ''}</div></section>`;
+    }
+    procurementEvidence(turn) {
+        return (turn.procurement || []).map(entry => {
+            const result = entry.result || {};
+            if (result.quotes) return `<div class="hub-table-scroll"><table class="hub-quote-comparison"><thead><tr><th>供应商 / 物料规格</th><th>数量 / 单价</th><th>税运 / 交期 / 有效期 / 付款</th><th>含税到仓总额</th><th>待核对项</th></tr></thead><tbody>${result.quotes.map(row => `<tr><td>${this.esc(row.quote?.supplier || '待明确')}<br>${this.esc(row.quote?.material || '待明确')} ${this.esc(row.quote?.spec || '')}</td><td>${this.esc(row.quote?.quantity ?? '待明确')} ${this.esc(row.quote?.unit || '')}<br>¥${this.esc(row.quote?.unit_price ?? '待明确')}</td><td>${this.esc(row.quote?.tax || '待明确')}${row.quote?.tax_rate != null ? '（税率 '+this.esc(row.quote.tax_rate)+'%）' : ''} / 运费 ${this.esc(row.quote?.freight ?? '待明确')}<br>${this.esc(row.quote?.delivery || '待明确')} / ${this.esc(row.quote?.valid_until || '待明确')}<br>${this.esc(row.quote?.payment || '待明确')}</td><td>${row.total === null ? '待明确' : '¥' + Number(row.total).toLocaleString('zh-CN',{minimumFractionDigits:2})}</td><td>${this.esc((row.issues || []).join('；') || '条件齐全')}</td></tr>`).join('')}</tbody></table><p class="hub-table-note">${this.esc(result.comparison_note || '')}</p></div>`;
+            if (result.sources) return `<details><summary>网上参考价与来源</summary><p>${this.esc(result.market_reference || '')}</p>${Object.entries(result.sources).filter(([url]) => /^https?:\/\//.test(url)).map(([url,title]) => `<a href="${this.esc(url)}" target="_blank" rel="noopener noreferrer">${this.esc(title)}</a>`).join('<br>')}</details>`;
+            return '';
+        }).join('');
     }
     sourceCard(source) {
         if (source.actor) {
@@ -411,7 +447,7 @@ frappe.SupplyHub = class {
             ${snapshot?.scenario_key === 'connector-1286' && !snapshot.updated && !snapshot.human_sources?.length && turn.state === 'done' ? `<button type="button" data-scenario-update="${this.esc(turn.name)}">加载10:18演示新消息：200 → 120</button>` : ''}
             ${snapshot?.scenario_key === 'connector-1286' && turn.state === 'done' ? `<button type="button" data-priority-review="${this.esc(turn.name)}">调整优先级并复核</button>` : ''}
             ${turn.synthetic && turn.state === 'done' ? `<button type="button" data-add-evidence="${this.esc(turn.name)}">补充信息并复核</button>` : ''}
-            ${(turn.documents || []).map(doc => `<button type="button" class="hub-draft" data-doctype="${this.esc(doc.doctype)}" data-docname="${this.esc(doc.name)}">打开物料需求单 ${this.esc(doc.name)} ↗</button>`).join('')}${turn.documents?.length ? '<p class="hub-table-note">已登记物料需求单。请打开核对当前状态；草稿提交后进入询价、比价和采购审批。</p>' : ''}${(turn.offers || []).map((offer,index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">打开未保存草稿，仍需核对、审批。</p>' : ''}</article>`;
+            ${this.applicationCard(turn)}${this.procurementEvidence(turn)}${(turn.documents || []).map(doc => `<button type="button" class="hub-draft" data-doctype="${this.esc(doc.doctype)}" data-docname="${this.esc(doc.name)}">打开物料需求单 ${this.esc(doc.name)} ↗</button>`).join('')}${turn.documents?.length ? '<p class="hub-table-note">已登记物料需求单。请打开核对当前状态；草稿提交后进入询价、比价和采购审批。</p>' : ''}${(turn.offers || []).map((offer,index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">打开未保存草稿，仍需核对、审批。</p>' : ''}</article>`;
         }).join('') : `<div class="hub-empty"><h2>${this.module === 'control' ? '查看模块上报，协调下一步' : this.names[this.module] + '有哪些问题需要处理？'}</h2></div>`;
         if (this.tracePreview) markup += `<article class="hub-message hub-assistant">${this.scenarioBrief(this.tracePreview,'preview')}<button type="button" data-priority-preview>设置本次优先级</button><button type="button" class="hub-new" data-run-trace>开始四部门核查</button><p class="hub-table-note">读取以上演示证据调用真实模型；核查后可加载新消息，查看方案如何变化。</p></article>`;
         if (this.messageMarkup === markup) return;
@@ -422,6 +458,7 @@ frappe.SupplyHub = class {
     renderBusy() {
         this.host.find('.hub-send').prop('disabled', this.restoring || this.busy || !this.data?.model_ready).text(this.busy ? '分析中…' : '发送 ↑');
         this.host.find('.hub-new').prop('disabled', this.restoring || this.busy);
+        this.host.find('[data-confirm-application],[data-start-comparison],[data-quote-image]').prop('disabled',this.restoring || this.busy);
         this.host.find('[data-prompt], [data-live-discussion], [data-run-trace], [data-scenario-update], [data-add-evidence], [data-priority-review]').prop('disabled', this.restoring || this.busy || !this.data?.model_ready);
         this.host.find('[data-trace-demo], [data-priority-preview]').prop('disabled', this.restoring || this.busy);
     }
@@ -435,7 +472,7 @@ frappe.SupplyHub = class {
         this.busy = true;
         this.renderBusy();
         try {
-            const response = await this.call('start', {question, module, conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario});
+            const response = await this.call('start', {question, module, client_version: 'procurement-approval-v1', conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario});
             const turn = {...response, question, agent_module: module, state: 'queued'};
             this.turns.push(turn);
             if (scenario.scenario_id === 6) { this.tracePreview = null; this.tracePrioritySelection = null; }

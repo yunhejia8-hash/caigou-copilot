@@ -26,6 +26,11 @@ test('模型未配置时不提交任务', async () => {
     await assert.rejects(chat(request('你好')), /尚未配置/);
     assert.equal(calls.length, 1);
 });
+test('总控请求携带服务端声明版本，兼容采购申请门槛', async () => {
+    const {chat,calls}=setup({chat_status:()=>({model_ready:true,client_version:'procurement-approval-v1'}),start:()=>({name:'T'}),poll:()=>({state:'done',answer:'已核实'})});
+    await chat(request('查订单'));
+    assert.equal(calls.find(x=>x.method.endsWith('.start')).args.client_version,'procurement-approval-v1');
+});
 test('失败任务和空回复不伪装成成功', async () => {
     for (const result of [{state: 'failed'}, {state: 'done', answer: ''}]) {
         const {chat} = setup({chat_status: () => ({model_ready: true}), start: () => ({name: 'T'}), poll: () => result});

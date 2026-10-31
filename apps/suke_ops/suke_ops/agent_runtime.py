@@ -47,10 +47,14 @@ SPECIALTY.update({
 
 
 def configured():
-    return all(os.environ.get(key) for key in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL'))
+    from suke_ops.responses_provider import configured as responses_configured
+    return responses_configured() or all(os.environ.get(key) for key in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL'))
 
 
 def request_model(system, messages, tools):
+    from suke_ops import responses_provider
+    if not all(os.environ.get(key) for key in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL')) and responses_provider.configured():
+        return responses_provider.request_model(system, messages, tools)
     if not configured():
         raise RuntimeError('尚未配置模型服务；请继续使用手动业务入口。')
     base = os.environ['ANTHROPIC_BASE_URL'].rstrip('/')
@@ -142,6 +146,10 @@ def respond(module, question, history, tool_specs, dispatch, trace, provider=Non
     if 'ask_module' in allowed:
         system += '\n需要深入分析时调用 ask_module 委派给相关模块。'
     system += '\n模块Agent的回答同时作为向总控的汇报，必须说明已发现问题、业务依据、影响、处理建议及需要总控协调的事项；无问题或未核实须如实标注。默认先给结论，再列最多5条关键事实与下一步，用户要求细节时再展开。摘要问题读取一次模块面板即可回答，只有用户明确要求某张单据细节时才继续逐单查询。每个模块仅委派一次，先取得所有相关模块摘要再汇总。每批最多6个工具；同样参数只查询一次。模块失败时明确列出未核实部分，不得补造事实。'
+    if 'procurement_intake' in allowed:
+        system += '\n私有PDF申请使用 procurement_intake，报价比较使用 procurement_compare，明确联网查价使用 procurement_search。桥接工具结果不代表正式ERP建单；缺项须如实追问，金额只引用程序结果，不编造评分。参考价不代表供应商承诺，报价修改必须核实本版条款。'
+        if 'create_material_request' in allowed:
+            system += '\n用户明确要求登记原生ERP需求单时，优先 read_request_context/create_material_request 原生路径，不调用PDF桥接；已保存单号须依据真实工具结果回报。'
     # 保留已确认事实，同时标清旧动作限制的作用范围；不把助手旧结论升级为事实。
     messages = [{**message, 'content': '【历史轮次，仅作背景，动作限制适用于当时】\n' + message['content']}
                 if isinstance(message.get('content'), str) else dict(message) for message in history[-8:]]
