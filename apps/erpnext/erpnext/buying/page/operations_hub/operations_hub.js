@@ -1,6 +1,6 @@
 frappe.pages['operations-hub'].on_page_load = function (wrapper) {
-    const page = frappe.ui.make_app_page({parent: wrapper, title: '供应协同工作台', single_column: true});
-    frappe.require(['/assets/suke_ops/hub.css', '/assets/suke_ops/hub.js'], () => {
+    const page = frappe.ui.make_app_page({parent: wrapper, title: '总控主页', single_column: true});
+    frappe.require(['/assets/suke_ops/hub.css?v=modules-v3.css', '/assets/suke_ops/hub.js?v=modules-v3.js'], () => {
         wrapper.supply_hub = new frappe.SupplyHub(page);
     });
 };

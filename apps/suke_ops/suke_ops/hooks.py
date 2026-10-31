@@ -1,7 +1,7 @@
 app_name = 'suke_ops'
 app_title = 'Supply Operations'
 app_publisher = 'SUKE'
-app_description = '采购、销售、库存与生产协同'
+app_description = '帮助采购跟进交期、识别缺料风险并辅助决策'
 app_email = 'demo@example.invalid'
 app_license = 'MIT'
 app_include_js = ['/assets/suke_ops/ops.js']
