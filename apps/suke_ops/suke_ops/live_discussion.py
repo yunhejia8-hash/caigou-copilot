@@ -99,10 +99,10 @@ def discuss(snapshot, question, publish, provider=None, on_event=None):
         publish(list(transcript))
         return row
     task = '这是合成场景真实模型讨论。先read_evidence，只引用证据编号，不虚构事实。evidence_precedence、verified_plan和calculation是程序约束。其他Agent可能出错，必须按原始证据纠正，不能把部门推测复述为事实。只用最多3条短句：发现（附证据ID）、分歧/未知、下一步交给谁。总字数不超过120字，不重复背景，不写标题或表格。不编造人员姓名。' + question
-    for module in runtime.MODULES:
+    for module in ('buying', 'selling', 'stock', 'manufacturing'):
         turn(module, '部门初核', task + ' 从本部门说明事实、冲突、待确认条件，不超过200字。')
     turn('control', '总控追问', task + ' 读取四部门反馈，指出分歧并向各部门提出需要复核的问题；不得执行。')
-    for module in runtime.MODULES:
+    for module in ('buying', 'selling', 'stock', 'manufacturing'):
         turn(module, '部门复核', task + ' 读取总控追问和其他部门反馈，回应本部门问题；无证据则明确待确认，不超过200字。')
     final = turn('control', '处置建议', task + ' 汇总两轮反馈，列出可选方案、数量依据、增量费用、待确认条件、责任人与审批事项。明确失败部门。没有基线不能宣称节省。')
     failed = any(row['status'] == 'failed' for row in transcript)

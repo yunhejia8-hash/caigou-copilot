@@ -1,0 +1,67 @@
+{
+  "stages": [
+    {
+      "stage": "inquiry",
+      "url": "http://127.0.0.1:8081/desk/buying/operations-buying-inquiry",
+      "agent": "询价 Agent",
+      "board": "询价数据看板\n刷新\n询价草稿\n0单\n已提交询价\n0单\n已取消询价\n0单\n当前进度与明细 ↗\n\n暂无记录\n\n已收到的报价（需按询价单核对） ↗\n\n暂无记录\n\n待跟进问题\n\n当前可见数据未发现规则预警。\n\n最新分析记录\n\n更新于 2026-10-31 15:06:54.909311 · 按当前账号权限统计；列表显示最近12笔。进度以各单据状态为准，环节间数量不能直接当作转化率。"
+    },
+    {
+      "stage": "comparison",
+      "url": "http://127.0.0.1:8081/desk/buying/operations-buying-comparison",
+      "agent": "比价 Agent",
+      "board": "比价数据看板\n刷新\n报价草稿\n0单\n已提交报价\n0单\n已过有效期\n0单\n当前进度与明细 ↗\n\n暂无记录\n\n待跟进问题\n\n当前可见数据未发现规则预警。\n\n最新分析记录\n\n更新于 2026-10-31 15:06:56.091268 · 按当前账号权限统计；列表显示最近12笔。进度以各单据状态为准，环节间数量不能直接当作转化率。"
+    },
+    {
+      "stage": "approval",
+      "url": "http://127.0.0.1:8081/desk/buying/operations-buying-approval",
+      "agent": "审批 Agent",
+      "board": "审批数据看板\n刷新\n待审批\n0单\n已驳回\n0单\n已批准\n0单\n当前进度与明细 ↗\n\n暂无记录\n\n待跟进问题\n\n当前可见数据未发现规则预警。\n\n最新分析记录\n\n更新于 2026-10-31 15:06:57.206047 · 按当前账号权限统计；列表显示最近12笔。进度以各单据状态为准，环节间数量不能直接当作转化率。"
+    },
+    {
+      "stage": "order",
+      "url": "http://127.0.0.1:8081/desk/buying/operations-buying-order",
+      "agent": "采购 Agent",
+      "board": "采购数据看板\n刷新\n订单草稿\n0单\n待收货\n3单\n已收齐\n0单\n当前进度与明细 ↗\n单号\t进度 / 状态\t供应商\t交期\t已收货 %\nPUR-ORD-2026-00003 ↗\tTo Receive and Bill\tSUKE-FLOW-演示供应商\t2026-11-01\t0\nPUR-ORD-2026-00002 ↗\tTo Receive and Bill\tSUKE-FLOW-演示供应商\t2026-11-01\t0\nPUR-ORD-2026-00001 ↗\tTo Receive and Bill\tSUKE-FLOW-演示供应商\t2026-11-01\t0\n待跟进问题\n采购 · 待收货：3单，需跟进。\n最新分析记录\n\n更新于 2026-10-31 15:06:58.119885 · 按当前账号权限统计；列表显示最近12笔。进度以各单据状态为准，环节间数量不能直接当作转化率。"
+    },
+    {
+      "stage": "receipt",
+      "url": "http://127.0.0.1:8081/desk/buying/operations-buying-receipt",
+      "agent": "入库 Agent",
+      "board": "入库数据看板\n刷新\n待提交收货\n0单\n已提交收货\n0单\n退货单\n0单\n质检不合格\n0单\n当前进度与明细 ↗\n\n暂无记录\n\n待到货订单 ↗\n订单\t供应商\t交期\t已收货 %\nPUR-ORD-2026-00003 ↗\tSUKE-FLOW-演示供应商\t2026-11-01\t0\nPUR-ORD-2026-00002 ↗\tSUKE-FLOW-演示供应商\t2026-11-01\t0\nPUR-ORD-2026-00001 ↗\tSUKE-FLOW-演示供应商\t2026-11-01\t0\n质量检验 ↗\n\n暂无记录\n\n待跟进问题\n\n当前可见数据未发现规则预警。\n\n最新分析记录\n\n更新于 2026-10-31 15:06:59.144523 · 按当前账号权限统计；列表显示最近12笔。进度以各单据状态为准，环节间数量不能直接当作转化率。"
+    },
+    {
+      "stage": "demand",
+      "url": "http://127.0.0.1:8081/desk/buying/operations-buying-demand",
+      "agent": "物料需求单 Agent",
+      "board": "物料需求单数据看板\n刷新\n待提交\n0单\n待采购\n0单\n已订购\n3单\n当前进度与明细 ↗\n单号\t进度 / 状态\t需求日期\t已订购 %\nMAT-MR-2026-00003 ↗\tOrdered\t2026-11-01\t100\nMAT-MR-2026-00002 ↗\tOrdered\t2026-11-01\t100\nMAT-MR-2026-00001 ↗\tOrdered\t2026-11-01\t100\n物料明细（最近单据，最多60行） ↗\n单号\t物料\t数量\t单位\t需求日期\nMAT-MR-2026-00003 ↗\tSUKE-CONN-DEMO1031\t600\tNos\t2026-11-01\nMAT-MR-2026-00002 ↗\tSUKE-CONN-TEST\t600\tNos\t2026-11-01\nMAT-MR-2026-00001 ↗\tSUKE-CONN-MAIN\t600\tNos\t2026-11-01\n待跟进问题\n\n当前可见数据未发现规则预警。\n\n最新分析记录\n\n更新于 2026-10-31 15:09:38.155166 · 按当前账号权限统计；列表显示最近12笔。进度以各单据状态为准，环节间数量不能直接当作转化率。"
+    }
+  ],
+  "modules": [
+    {
+      "module": "selling",
+      "url": "http://127.0.0.1:8081/desk/selling/operations-selling",
+      "agent": "销售 Agent",
+      "otherAgentNavigation": 0,
+      "board": "销售数据看板\n刷新\n待交付订单\n9单\n已逾期订单\n0单\n订单草稿\n0单\n销售数据面板\n未完成业务单据\n订单\t客户\t交期\t完成 %\t状态\nSAL-ORD-2026-00009 ↗\tSUKE-FLOW-演示客户\t2026-11-01\t0\tTo Deliver and Bill\nSAL-ORD-2026-00008 ↗\tSUKE-FLOW-演示客户\t2026-11-01\t0\tTo Deliver and Bill\nSAL-ORD-2026-00007 ↗\tSUKE-FLOW-演示客户\t2026-11-01\t0\tTo Deliver and Bill\nSAL-ORD-2026-00006 ↗\tSUKE-FLOW-演示客户\t2026-11-01\t0\tTo Deliver and Bill\nSAL-ORD-2026-00005 ↗\tSUKE-FLOW-演示客户\t2026-11-01\t0\tTo Deliver and Bill\nSAL-ORD-2026-00004 ↗\tSUKE-FLOW-演示客户\t2026-11-01\t0\tTo Deliver and Bill\nSAL-ORD-2026-00003 ↗\tSUKE-FLOW-演示客户\t2026-11-01\t0\tTo Deliver and Bill\nSAL-ORD-2026-00002 ↗\tSUKE-FLOW-演示客户\t2026-11-01\t0\tTo Deliver and Bill\nSAL-ORD-2026-00001 ↗\tSUKE-FLOW-演示客户\t2026-11-01\t0\tTo Deliver and Bill\n发货记录 ↗\n\n暂无记录\n\n待跟进问题\n销售 · 待交付订单：9单，需本模块跟进。\n最新分析记录\n\n更新于 2026-10-31 15:07:38.943359 · 指标按权限统计，明细显示最近12笔。"
+    },
+    {
+      "module": "stock",
+      "url": "http://127.0.0.1:8081/desk/stock/operations-stock",
+      "agent": "库存 Agent",
+      "otherAgentNavigation": 0,
+      "board": "库存数据看板\n刷新\n有现存量的物料仓位\n3项\n有效预留记录\n3条\n预计缺料仓位（未分交期）\n0项\n库存数据面板\n现存库存明细\n物料\t仓库\t现存量\t实际预留\t预计数量\nSUKE-CONN-DEMO1031\tStores - SC\t320\t120\t200\nSUKE-CONN-TEST\tStores - SC\t320\t120\t200\nSUKE-CONN-MAIN\tStores - SC\t320\t120\t200\n\n现存量不等于可分配量；预计数量未区分交期，不能据此判断按时交付。请进入异常方案核对交期、冻结和预留归属。\n\n库存预留 ↗\n单号\t状态\t物料\t仓库\t预留数量\nMAT-SRE-2026-00003 ↗\tReserved\tSUKE-CONN-DEMO1031\tStores - SC\t120\nMAT-SRE-2026-00002 ↗\tReserved\tSUKE-CONN-TEST\tStores - SC\t120\nMAT-SRE-2026-00001 ↗\tReserved\tSUKE-CONN-MAIN\tStores - SC\t120\n质量检验 ↗\n\n暂无记录\n\n收货记录 ↗\n\n暂无记录\n\n待跟进问题\n\n当前可见数据未发现规则预警。\n\n最新分析记录\n\n更新于 2026-10-31 15:07:39.824783 · 指标按权限统计，明细显示最近12笔。"
+    },
+    {
+      "module": "manufacturing",
+      "url": "http://127.0.0.1:8081/desk/manufacturing/operations-manufacturing",
+      "agent": "生产 Agent",
+      "otherAgentNavigation": 0,
+      "board": "生产数据看板\n刷新\n未完成工单\n3单\n生产中\n0单\n待启动工单\n3单\n生产数据面板\n未完成业务单据\n工单\t产品\t计划数量\t已完工\t计划开工\t状态\nMFG-WO-2026-00003 ↗\tSUKE-DEVICE-DEMO1031\t150\t0\t2026-11-01 08:00:00\tNot Started\nMFG-WO-2026-00002 ↗\tSUKE-DEVICE-TEST\t150\t0\t2026-11-01 08:00:00\tNot Started\nMFG-WO-2026-00001 ↗\tSUKE-DEVICE-MAIN\t150\t0\t2026-11-01 08:00:00\tNot Started\n工序执行 ↗\n\n暂无记录\n\n待跟进问题\n生产 · 待启动工单：3单，需本模块跟进。\n最新分析记录\n\n更新于 2026-10-31 15:07:43.671288 · 指标按权限统计，明细显示最近12笔。"
+    }
+  ],
+  "nativeLink": {
+    "url": "http://127.0.0.1:8081/desk/buying/material-request/MAT-MR-2026-00003",
+    "title": "Purchase Request for 合成演示-连接器-DEMO1031 - MAT-MR-2026-00003"
+  }
+}
