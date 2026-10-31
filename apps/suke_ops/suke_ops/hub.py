@@ -1,4 +1,4 @@
-"""对话主页 API：真实业务面板、用户隔离会话、四模块 Agent 和待人工保存的草稿。"""
+"""对话主页 API：真实业务面板、用户隔离会话、需求登记和原生草稿入口。"""
 import hashlib
 import json
 import uuid
@@ -8,6 +8,7 @@ import frappe
 from frappe.utils import cint, flt, now_datetime, nowdate
 
 from suke_ops import agent_runtime as runtime
+from suke_ops import demand
 
 MODULE_DOCS = {
     'buying': ['Material Request', 'Request for Quotation', 'Supplier Quotation', 'Purchase Order', 'Supplier', 'Purchase Receipt', 'Quality Inspection'],
@@ -41,7 +42,17 @@ DRAFTS = {
     'receive_purchase': ('stock', 'Purchase Order', 'Purchase Receipt', 'erpnext.buying.doctype.purchase_order.purchase_order.make_purchase_receipt'),
     'deliver_sales': ('selling', 'Sales Order', 'Delivery Note', 'erpnext.selling.doctype.sales_order.sales_order.make_delivery_note'),
     'finish_production': ('manufacturing', 'Work Order', 'Stock Entry', 'erpnext.manufacturing.doctype.work_order.work_order.make_stock_entry'),
+    'inquiry_from_request': ('buying', 'Material Request', 'Request for Quotation', 'erpnext.stock.doctype.material_request.material_request.make_request_for_quotation'),
+    'purchase_from_quotation': ('buying', 'Supplier Quotation', 'Purchase Order', 'erpnext.buying.doctype.supplier_quotation.supplier_quotation.make_purchase_order'),
 }
+
+
+def draft_modules(action):
+    return {DRAFTS[action][0], *{
+        'purchase_from_request': ['buying-order'],
+        'inquiry_from_request': ['buying-demand', 'buying-inquiry'],
+        'purchase_from_quotation': ['buying-comparison', 'buying-order'],
+    }.get(action, [])}
 
 
 def require_user():
@@ -377,7 +388,7 @@ def history(conversation, module=None):
     rows = frappe.get_list('Agent Turn', filters=filters,
                            fields=['name', 'question', 'answer', 'agent_module', 'state', 'result'],
                            order_by='creation desc, name desc', limit_page_length=50)
-    # One permission-filtered read instead of up to 50 sequential browser poll calls.
+    # 一次按权限读取完整历史，保留已建单据、失败留痕和合成场景边界。
     return [{**json.loads(row.pop('result') or '{}'), **row} for row in reversed(rows)]
 
 
@@ -408,7 +419,7 @@ def read_record(module, doctype, name):
 
 def draft_offer(module, action, source):
     definition = DRAFTS.get(action)
-    if not definition or definition[0] != module:
+    if not definition or module not in draft_modules(action):
         frappe.throw('该模块不能调用此操作。', frappe.PermissionError)
     _, source_type, target_type, _ = definition
     doc = frappe.get_doc(source_type, source)
@@ -417,6 +428,10 @@ def draft_offer(module, action, source):
         frappe.throw('没有创建目标单据的权限。', frappe.PermissionError)
     if doc.docstatus != 1 or doc.get('status') in ('Closed', 'Cancelled', 'Stopped', 'Completed'):
         frappe.throw('源单据不是可继续履约的已提交单据。')
+    if source_type == 'Material Request' and doc.material_request_type != 'Purchase':
+        frappe.throw('只有采购类型物料需求单能进入采购流程。')
+    if source_type == 'Supplier Quotation' and doc.get('valid_till') and str(doc.valid_till) < nowdate():
+        frappe.throw('供应商报价已过有效期，请先取得有效报价。')
     # 上游序列号/批次映射会提前插入 Bundle；这些场景保留原生手动流程，
     # 不把有落库副作用的映射包装成只读草稿。
     items = {row.item_code for table in ('items', 'required_items') for row in (doc.get(table) or [])}
@@ -430,6 +445,13 @@ def draft_offer(module, action, source):
             'modified': str(doc.modified), 'label': '从 ' + source + ' 准备' + LABELS[target_type] + '草稿'}
 
 
+def action_tool():
+    return runtime.schema('report_action', '结束前报告产出；未提供草稿必须说明具体原因、缺项和下一步；此工具不创建业务单据',
+                          {'status': runtime.text_schema(['analysis_only', 'blocked', 'draft_ready', 'document_created']),
+                           'reason': runtime.text_schema(), 'next_step': runtime.text_schema()},
+                          ['status', 'reason', 'next_step'])
+
+
 def module_tools(module):
     specs = [runtime.schema('read_module_board', '读取当前环节或模块的进度、指标和最近12笔单据', {}),
             runtime.schema('list_records', '列出指定类型最近12笔单据；不是全部记录',
@@ -440,11 +462,15 @@ def module_tools(module):
                            {'name': runtime.text_schema()}, ['name'])]
     if module == 'buying':
         specs.append(runtime.schema('read_procurement_progress', '读取采购六环节的进度和专项Agent最新汇报', {}))
-    if module in MODULE_DOCS:
+    actions = [key for key in DRAFTS if module in draft_modules(key)]
+    if actions:
         specs.append(runtime.schema('offer_draft', '仅建议打开原生未保存草稿；用户点击后重新校验源版本和权限，不会自动保存或提交',
-                           {'action': runtime.text_schema([key for key, value in DRAFTS.items() if value[0] == module]),
+                           {'action': runtime.text_schema(actions),
                             'source': runtime.text_schema()}, ['action', 'source']))
-    return specs
+    if module in demand.MODULES:
+        specs.extend([runtime.schema('read_request_context', '按物料编码或名称查可采购物料、库存单位、公司和仓库候选；创建需求单前核实',
+                                     {'search': runtime.text_schema()}, ['search']), demand.CREATE_TOOL])
+    return [*specs, action_tool()]
 
 
 def run_turn(name):
@@ -459,6 +485,8 @@ def run_turn(name):
     frappe.db.commit()
     trace, offers, budget, tool_budget = [], [], [18], [48]
     module_results = []
+    action_results = {}
+    documents = []
     board_cache = {}
     run_started = time.monotonic()
     try:
@@ -482,6 +510,17 @@ def run_turn(name):
                     ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
 
         def execute_tool(module, tool, args):
+            if tool == 'report_action':
+                if not args['reason'].strip() or not args['next_step'].strip():
+                    raise RuntimeError('行动结果缺少具体原因或下一步。')
+                available = offers if module == 'control' else [offer for offer in offers if module in draft_modules(offer['action'])]
+                if args['status'] == 'draft_ready' and not available:
+                    raise RuntimeError('本轮没有实际草稿入口，不能报告草稿已准备。')
+                if args['status'] == 'document_created' and not documents:
+                    raise RuntimeError('本轮没有实际物料需求单，不能报告单据已创建。')
+                action_results[module] = dict(args)
+                return {**args, 'documents': documents, 'saved_documents': sum(not row['reused'] for row in documents),
+                        'draft_count': len(available)}
             if module == 'buying' and tool == 'read_procurement_progress':
                 return {'stages': [stage_board(key) for key in STAGE_DOCS],
                         'reports': [row for row in latest_reports() if row['module'] in STAGE_DOCS]}
@@ -495,6 +534,19 @@ def run_turn(name):
                 return run_module_batch([args])[0]
             if module not in AGENT_DOCS:
                 frappe.throw('未知模块。', frappe.PermissionError)
+            if tool == 'read_request_context' and module in demand.MODULES:
+                return demand.context(**args)
+            if tool == 'create_material_request' and module in demand.MODULES:
+                frappe.db.savepoint('agent_material_request')
+                try:
+                    document = demand.create(module, turn, **args, current_documents=documents)
+                except (RuntimeError, frappe.ValidationError, frappe.DoesNotExistError, frappe.PermissionError) as error:
+                    frappe.db.rollback(save_point='agent_material_request')
+                    reason = '没有读取主数据或创建物料需求单的权限。' if isinstance(error, frappe.PermissionError) else str(error)
+                    return {'status': 'blocked', 'reason': reason, 'next_step': '请补齐或修正所列信息后重试；本次未创建物料需求单。'}
+                if not any(row['name'] == document['name'] for row in documents):
+                    documents.append(document)
+                return document
             if tool == 'read_module_board':
                 if module not in board_cache:
                     board_cache[module] = {**module_board(module), 'read_at': str(now_datetime())}
@@ -521,7 +573,7 @@ def run_turn(name):
         def audit(module, kind, summary, **extra):
             events.append({'id': len(events)+1, 'module': module, 'kind': kind,
                            'phase': '业务查询', 'at': str(now_datetime()), 'summary': summary, **extra})
-            frappe.db.set_value('Agent Turn', name, 'result', json.dumps({'events': events, 'trace': trace, 'offers': offers}, ensure_ascii=False, default=str))
+            frappe.db.set_value('Agent Turn', name, 'result', json.dumps({'events': events, 'trace': trace, 'offers': offers, 'documents': documents, 'actions': action_results}, ensure_ascii=False, default=str))
             frappe.db.commit()
         def dispatch(module, tool, args):
             labels = {'ask_module': '委派部门核查', 'read_module_reports': '读取部门汇报', 'read_module_board': '核查业务看板', 'list_records': '查询单据清单', 'read_record': '核对单据详情', 'compare_supply_case': '计算缺料方案', 'offer_draft': '准备草稿入口'}
@@ -558,8 +610,8 @@ def run_turn(name):
                     remaining -= 1
                     continue
                 tool_budget[0] -= 1  # Program pre-read is a real read, not a free model tool.
-                # Reserve bounded per-child budgets on this thread; unused quota returns on completion.
-                quota = min(4, max(0, budget[0]-1) // max(1, remaining))
+                # 调用线程分配子预算，需求最多5轮，总控预留2轮；完成后归还剩余额度。
+                quota = min(5 if target in demand.MODULES else 4, max(0, budget[0]-2) // max(1, remaining))
                 tools_quota = min(10, tool_budget[0] // max(1, remaining))
                 remaining -= 1
                 budget[0] -= quota
@@ -599,16 +651,22 @@ def run_turn(name):
             return [prepared[args['module']] for args in requests]
 
         def dispatch_many(module, calls):
-            values, delegated = [None] * len(calls), []
-            for index, (tool, args) in enumerate(calls):
-                if module == 'control' and tool == 'ask_module':
-                    audit(module, 'query', '委派部门并行核查', tool=tool, query=args)
-                    delegated.append((index, args))
-                else:
-                    values[index] = dispatch(module, tool, args)
-            if delegated:
-                for (index, args), value in zip(delegated, run_module_batch([args for _, args in delegated])):
-                    values[index] = value
+            # 只并行连续的部门委派；后续结果报告必须等前面的建单或草稿完成。
+            values, index = [], 0
+            while index < len(calls):
+                tool, args = calls[index]
+                if module != 'control' or tool != 'ask_module':
+                    values.append(dispatch(module, tool, args))
+                    index += 1
+                    continue
+                delegated = []
+                while index < len(calls) and calls[index][0] == 'ask_module':
+                    args = calls[index][1]
+                    audit(module, 'query', '委派部门并行核查', tool='ask_module', query=args)
+                    delegated.append(args)
+                    index += 1
+                for args, value in zip(delegated, run_module_batch(delegated)):
+                    values.append(value)
                     audit(module, 'evidence', '已收到部门反馈；按原部门记录追查依据。', tool='ask_module', query=args,
                           result_excerpt=json.dumps(value, ensure_ascii=False), truncated=False)
             return values
@@ -618,6 +676,7 @@ def run_turn(name):
             if turn.agent_module == 'control' else module_tools(turn.agent_module)
         if turn.agent_module == 'control':
             specs.append(runtime.schema('read_module_reports', '读取各模块已上报分析与最新风险面板；研判上报时先调用', {}))
+            specs.append(action_tool())
         try:
             tool_budget[0] -= 1
             initial = dispatch(turn.agent_module, 'read_module_reports' if turn.agent_module == 'control' else 'read_module_board', {})
@@ -625,24 +684,50 @@ def run_turn(name):
                                      budget=budget, tool_budget=tool_budget, initial_evidence=initial,
                                      batch_dispatch=dispatch_many)
         except RuntimeError:
-            if not any(row['status'] == 'done' for row in module_results):
+            if not documents and not any(row['status'] == 'done' for row in module_results):
                 raise
-            answer = '汇总未完成，已取得的模块结果如下：\n\n' + '\n\n'.join(
+            answer = ('物料需求单已登记，模型后续说明未完成。' if documents else '汇总未完成，已取得的模块结果如下：') + '\n\n' + '\n\n'.join(
                 runtime.MODULES[row['module']] + '：' + (row['answer'] if row['status'] == 'done' else '本轮未核实，请切换该模块重试。')
                 for row in module_results)
         failed_modules = sorted({runtime.MODULES[row['module']] for row in module_results if row['status'] == 'failed'})
         if failed_modules:
             answer += '\n\n未核实模块：' + '、'.join(failed_modules) + '。可切换对应模块重试。'
+        action = action_results.get(turn.agent_module) or {
+            'status': 'blocked', 'reason': '本轮汇总未完成，未取得完整行动结果。',
+            'next_step': '请切换相关模块继续核实；已有草稿入口仍需打开核对。'}
+        if documents:
+            action = {'status': 'document_created', 'reason': '采购需求已登记；下方为真实物料需求单，重复需求复用原单。',
+                      'next_step': documents[0]['next_step']}
+        labels = {'analysis_only': '仅完成分析', 'blocked': '待处理阻碍', 'draft_ready': '已提供草稿入口',
+                  'document_created': '已登记物料需求单'}
+        draft_label = '待保存的下游草稿入口' if documents else '可打开草稿入口'
+        answer += ('\n\n**本轮行动结果：' + labels[action['status']] + '**\n'
+                   + f"\n已保存业务单据：{sum(not row['reused'] for row in documents)} 张；{draft_label}：{len(offers)} 个。\n"
+                   + '\n原因：' + action['reason'] + '\n\n下一步：' + action['next_step'])
+        if documents:
+            answer += '\n\n物料需求单：' + '、'.join(row['name'] + ('（复用已有单据）' if row['reused'] else '（已保存，未提交）') for row in documents)
         frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
-                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'events': events,
+                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'events': events, 'action': action, 'documents': documents,
                                 'timing': {'total_ms': round((time.monotonic()-run_started)*1000),
                                            'model_calls': sum(row.get('tool') == 'model_request' for row in trace)}}, ensure_ascii=False, default=str)})
     except Exception as error:
         frappe.db.rollback()
-        frappe.db.set_value('Agent Turn', name, {'state': 'failed',
-                            'answer': ('本轮分析未完成：' + str(error) if type(error) is RuntimeError else
-                                       '本轮分析未完成：请检查业务权限或问题范围后重试。') + ' 业务单据未由 Agent 保存或提交。',
-                            'result': json.dumps({**json.loads(frappe.db.get_value('Agent Turn', name, 'result') or '{}'), 'error_type': type(error).__name__, 'trace': trace}, ensure_ascii=False)})
+        saved = json.loads(frappe.db.get_value('Agent Turn', name, 'result') or '{}')
+        # 审计可能已提交业务写入；按持久化结果恢复，避免误报未保存和重试重复建单。
+        saved_documents = [row for row in saved.get('documents', [])
+                           if frappe.db.exists(row['doctype'], row['name'])]
+        if saved_documents:
+            saved['documents'] = saved_documents
+            saved['action'] = {'status': 'document_created', 'reason': '需求单已保存，后续分析未完成。',
+                               'next_step': saved_documents[0]['next_step']}
+            answer = '物料需求单已登记，后续分析未完成。请打开原单核对，无需重复申请。\n' + '、'.join(row['name'] for row in saved_documents)
+            state = 'done'
+        else:
+            answer = ('本轮分析未完成：' + str(error) if type(error) is RuntimeError else
+                      '本轮分析未完成：请检查业务权限或问题范围后重试。') + ' 业务单据未由 Agent 保存或提交。'
+            state = 'failed'
+        frappe.db.set_value('Agent Turn', name, {'state': state, 'answer': answer,
+                            'result': json.dumps({**saved, 'error_type': type(error).__name__, 'trace': trace}, ensure_ascii=False)})
     frappe.db.commit()
 
 

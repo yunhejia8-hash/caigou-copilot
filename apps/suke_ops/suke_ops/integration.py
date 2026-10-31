@@ -136,8 +136,8 @@ def run():
             checks.append(source.doctype + '批准后原生提交成功')
         from frappe.desk.doctype.dock.dock import resolve_app_dock
         dock = resolve_app_dock('erpnext')
-        assert {r.get('link_to') for r in dock if not r.get('hidden')} == {'Buying', 'Selling', 'Stock', 'Manufacturing'}, dock
-        checks.append('解析后的ERPNext主导航仅四模块')
+        assert {r.get('link_to') for r in dock if not r.get('hidden')} == {'主页', 'Buying', 'Selling', 'Stock', 'Manufacturing'}, dock
+        checks.append('解析后的ERPNext主导航保留独立主页与四业务模块')
     finally:
         frappe.db.rollback(save_point='suke_verification')
     result = {'status': 'PASS', 'checks': checks, 'count': len(checks), 'test_case': name,

@@ -22,11 +22,17 @@
 
 ```powershell
 python tools/create_env.py
+python tools/configure_model.py
+python tools/verify_model_connection.py
 docker compose up -d --build
 docker compose ps -a
 ```
 
 等待 `initialize` 以状态 0 结束，访问 http://127.0.0.1:8081 。用户名 `Administrator`，本机 `.env` 的 `ADMIN_PASSWORD` 是随机生成的登录口令。初始化创建合成演示公司、主数据和 600 件连接器异常。再次启动不覆盖已有公司设置，已有 `.env` 不会被生成脚本覆盖。
+
+默认模型服务为 `https://api.openai-next.com`，模型为 `gpt-6.1-sol`。`configure_model.py` 隐藏输入 API Key，仅更新本地 `.env` 中的三个模型变量，保留数据库口令、管理员口令和端口；也可从 `ANTHROPIC_AUTH_TOKEN` 环境变量读取 Key。连接验证只发送合成测试内容，检查工具调用及结果返回，不读取业务数据。未填写 Key 时仍可使用手动业务。配置示例见 [.env.example](.env.example)。已有部署修改配置后运行 `docker compose up -d --build`，待后端启动完成再运行 `docker compose restart frontend` 刷新代理连接。
+
+若要选 Claude，可运行 `python tools/configure_model.py --model claude-sonnet-4-6`；其他兼容服务可通过 `--base-url` 和 `--model` 指定。沿用现有 Anthropic Messages 协议，GPT Sol 已通过本机工具调用验证；平台说明见 [接入文档](https://credits.openai-next.com/guide/quickstart)。
 
 口令、数据库、模型凭据、日志、配置备份不入 Git。真实模型服务通过 `ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`、`ANTHROPIC_AUTH_TOKEN` 环境变量配置；未配置时明确提示不可用，规则计算和手动业务仍可使用。供应商议价仅为模拟。
 
@@ -55,11 +61,17 @@ python tools/verify_realtime.py
 
 数据面板按当前账号权限统计；无权限显示“—”，不会混同为零。采购关注待收货和逾期订单，销售关注待交付订单，库存区分现存与实际预留，生产关注未完成工单。
 
-模型可以读取面板/单据、比较异常方案，并提供采购申请→采购单、采购单→收货、销售单→发货、工单→完工入库的原生未保存草稿入口。点击时再次校验权限及源单据版本，由用户补全字段、保存、审批和提交。Agent 不自动保存或提交业务单据。
+用户提出明确采购需求时，总控可委派物料需求单 Agent；采购和需求 Agent 核实物料、数量、单位、需求日期、公司及仓库后，直接保存采购类型物料需求单草稿，返回真实单号和打开按钮。缺少信息时一次说明具体缺项，不猜测数量、日期、供应商或价格；同会话相同需求复用原单，独立的新需求请新建对话。模型后续回答失败时仍展示已登记的需求单。需求单的保存是受控写入，不自动提交、审批或转为采购订单。
+
+需求单核对提交后，可由需求、询价或采购 Agent 提供询价草稿；收到真实报价并完成比价、选择有效报价后，比价、采购或采购下单 Agent 可提供报价转采购单草稿。保存采购草稿后，通过原生“申请协同审批”进入审批，批准后提交为正式采购订单。现有审批约束作用于已申请协同审批的单据，未将全部原生采购单改为强制审批。上述后续步骤仍需用户核对、提交及审批，不代表全流程无人操作。原有采购申请转采购单、采购单转收货、销售单转发货、工单转完工入库入口继续保留；打开时重新校验权限和源单据版本。
 
 带序列号/批次的物料使用原生手动创建：上游部分映射会提前生成批次记录，当前 Agent 草稿工具明确拒绝该路径。原手动功能不受此限制。争料方案和模拟议价仍在异常页面执行，原审批规则继续生效。
 
 会话仅本人可见；同账号并发任务通过数据库行锁限制，刷新恢复最近 50 轮。未配置模型或调用失败时明确提示，不把规则结果伪装成模型回答。对话采用后台队列，模型调用有轮数、工具数和超时上限。合法批量查询分批执行，相同参数复用本轮查询结果；子模块失败时标注未核实部分，汇总失败时保留已完成的模块结果。
+
+每轮回答必须报告行动结果：仅完成分析、待处理阻碍、已提供草稿入口或已登记物料需求单，并列出具体原因和下一步。系统按实际工具结果显示已保存单据和草稿入口数量；没有实际产出不能报告成功。未说明行动结果时要求模型补充，达到上限后明确显示失败原因。历史恢复保留单据和草稿按钮。当前仍不支持从对话新建生产工单或催办任务单。验证记录见 [行动结果闭环验收](verification/agent-action-result-20261031.json)、[需求登记与采购审批验收](verification/material-request-20261031.json) 和 [总控真实模型建单验收](verification/material-request-live-control-20261031.json)。真实模型测试只使用合成需求及最小合成查询结果，真实需求单校验后回滚。
+
+需求登记回归命令：`docker compose exec -T backend bench --site focus.local execute suke_ops.demand_integration.run`。如需重复真实模型测试：`docker compose exec -T backend bench --site focus.local execute suke_ops.demand_integration.run_live`；后者使用已配置模型服务并发送合成需求及最小主数据，两项测试均回滚测试业务变更。
 
 本次已在用户明确授权后，用 `api.deepseek.com` 对合成数据完成真实总控和四模块协作，记录见 [model-live.json](verification/model-live.json)。工具协议参考 [DeepSeek Anthropic 兼容说明](https://api-docs.deepseek.com/guides/anthropic_api/)。部署到其他环境时需自行配置模型服务并明确业务数据的外发授权，仓库不附带凭据。
 
@@ -94,7 +106,7 @@ python -u -B tools/run_scenario_demo.py
 
 在已保存的 `Supply Case` 表单工具栏点击 **采购对话**，无需跳转即可向现有采购 Agent 提问，例如“现在缺多少料？”、“比较销售优先与生产优先”或“有哪些到货条件还需要确认？”。每次提问带入当前异常单号，由现有服务端工具读取最新数据并校验权限。未保存的修改须先保存。
 
-弹窗复用协同主页的真实模型、工具白名单、后台队列和草稿入口；不引入原型的固定口令解析器或合成订单。会话按当前账号和异常单隔离，关闭后重新打开可继续；未配置模型时发送不可用，不伪造回答。模型只查询、分析及准备现有工具支持的未保存草稿，方案选择、审批与执行仍回原页面进行。部署前沿用上文模型配置及业务数据外发授权要求。
+弹窗复用协同主页的真实模型、工具白名单、后台队列和草稿入口；不引入原型的固定口令解析器或合成订单。会话按当前账号和异常单隔离，关闭后重新打开可继续；未配置模型时发送不可用，不伪造回答。模型可查询、分析、准备现有工具支持的未保存草稿，并在用户明确提出采购需求且资料齐全时保存受控的物料需求单草稿、返回真实单号；方案选择、单据提交、审批与执行仍由负责人在原页面完成。部署前沿用上文模型配置及业务数据外发授权要求。
 
 更新后运行 `bench build --app suke_ops` 并清理站点缓存，或按上文 Docker 构建流程部署。前端回归测试：`node --test tests/test_purchase_chat.cjs`。测试无需模型凭据；真实 Frappe 页面与模型联调需部署环境验收。
 
@@ -115,7 +127,7 @@ python -u -B tools/run_scenario_demo.py
 
 场景证据由服务端 `scenario_facts.json` 选择；只暴露只读证据工具，不读取真实 ERP 单据、不提供执行工具。程序核算首例数量与费用；其他案例的模型推理需人工复核。最多30次模型请求、40次工具读取；部门失败显式标记，不能当作完整方案。对话目标也会发往已配置模型平台，请仅输入合成问题。
 
-比赛平台文档：https://credits.openai-next.com/guide/quickstart 。Anthropic 协议地址为 `https://api.openai-next.com`，本地联调用模型 `claude-sonnet-4-6`。密钥只填写本地被忽略的 `.env`，不随仓库分发。保留其他兼容模型服务配置能力。更新后重建 Docker 并执行 main 要求的迁移和导航更新。
+比赛平台文档：https://credits.openai-next.com/guide/quickstart 。Anthropic 协议地址为 `https://api.openai-next.com`，当前默认模型为 `gpt-6.1-sol`，也可配置 `claude-sonnet-4-6`。密钥只填写本地被忽略的 `.env`，不随仓库分发。保留其他兼容模型服务配置能力。更新后重建 Docker 并执行 main 要求的迁移和导航更新。
 
 真实模型实测曾出现新旧证据及交期混淆，因此首例补充证据后另列程序核算；新证据优先于旧状态，部门回答不作为新业务事实。程序展示不能保证模型解释完全正确，最终审批仍需逐项核实。
 首例含补充证据时，最终结论由确定性程序模板提供，模型原话保留为待核实讨论；已测试模型即使误述09:00与10:00的先后顺序，也不能覆盖该程序结论。其余场景暂没有同等的完整程序方案保障。
@@ -134,7 +146,7 @@ python -u -B tools/run_scenario_demo.py
 
 每个专项使用独立职责提示、单据工具范围、会话和最新上报。需求看待采购量与订购进度；询价看询价状态和供应商回复；比价看逐物料单价、币种、单位和有效期；审批只显示采购订单关联审批；采购看交期和收货比例；入库看收货、仓库和来料质检。进度来自业务单据，不把环节单数当成转化率。没有记录时显示暂无记录；普通模块只显示本模块对话及数据。
 
-专项 Agent 给出建议，审批和业务写入仍由人工执行。采购概览 Agent 可读取六环节进度和汇报，总控可读取专项上报或直接委派专项。新增页面需要运行上述 migrate 和 customize_navigation。验收记录见 [第三版验收](verification/UI_V3.md)。
+专项 Agent 给出建议；当前需求 Agent 另支持受控保存需求单，询价与比价专项提供对应的原生草稿入口，审批及正式提交仍由人工执行。采购概览 Agent 可读取六环节进度和汇报，总控可读取专项上报或直接委派专项。新增页面需要运行上述 migrate 和 customize_navigation。第三版历史验收记录见 [第三版验收](verification/UI_V3.md)。
 
 
 ## 导航与数据范围（第四版）
@@ -153,6 +165,10 @@ python -u -B tools/run_scenario_demo.py
 主页地址为 `/desk/主页/operations-hub`，总览为 `/desk/主页/operations-data`。旧总控地址和采购旧总览地址会重定向到主页。总控页顶部与右侧模块卡片都在当前页切换对话对象，不切换侧栏、不跳往业务工作台。每个对话保留独立实例、会话、输入草稿及分析状态；后台回复不会写入另一个Agent会话。主页内选择采购时不显示采购六环节导航，专项操作通过左侧采购工作台进入。
 
 更新后运行 migrate 和 customize_navigation 并刷新浏览器。验收记录见 [第五版验收](verification/UI_V5.md)。
+
+## 独立采购需求预审网页
+
+新增 [apps/procurement_intake](apps/procurement_intake/README.md)：本地对话式需求预审，支持用量依据识别、澄清补充、新物料人工复核及 PDF。独立端口8765，不替换现有 ERPNext 主页，尚未连接其实时库存、预算或审批权限。启动、数据导入和57项测试说明见模块文档。
 
 ## 协作响应速度
 

@@ -16,7 +16,7 @@ def evidence(index, updated=False):
     if index == 6:
         from suke_ops.trace_scenario import evidence as trace_evidence
         return trace_evidence(updated)
-    rows = json.loads(Path(__file__).with_name('scenario_facts.json').read_text())
+    rows = json.loads(Path(__file__).with_name('scenario_facts.json').read_text(encoding='utf-8'))
     row = rows[index]
     if updated and index != 0:
         raise ValueError('此场景没有补充证据。')
@@ -123,7 +123,8 @@ def discuss(snapshot, question, publish, provider=None, on_event=None):
             local_trace, read_ids = [], set()
             # Each of the ten turns owns a separate allowance: <=30 calls / 40
             # tool requests overall, without races or one department starving peers.
-            model_budget, tool_budget = [3], [4]
+            # 每轮预读占一次额度，另留三次模型查询，十轮合计不超过四十次读取。
+            model_budget, tool_budget = [3], [3]
 
             def queue_event(kind, summary, **extra):
                 updates.put(('event', {'module': module, 'phase': phase, 'kind': kind,

@@ -1,0 +1,35 @@
+{
+  "status": "PASS",
+  "mode": "真实模型、生产工具集合及总控委派建单链；读取候选与看板使用最小合成数据；所有测试业务回滚",
+  "tools": [
+    {
+      "agent": "control",
+      "tool": "read_module_reports"
+    },
+    {
+      "agent": "buying-demand",
+      "tool": "read_request_context"
+    },
+    {
+      "agent": "buying-demand",
+      "tool": "create_material_request"
+    },
+    {
+      "agent": "buying-demand",
+      "tool": "report_action"
+    },
+    {
+      "agent": "control",
+      "tool": "ask_module"
+    },
+    {
+      "agent": "control",
+      "tool": "report_action"
+    }
+  ],
+  "answer": "已登记完成，需求单草稿为 **MAT-MR-2026-00004**，状态为草稿（未提交、未审批），共 1 张单据。\n\n下一步：请您打开该单，核对并提交；提交后按此单生成询价草稿、收集真实供应商报价并比价，您选定有效报价后再准备采购草稿并申请协同审批，批准后才提交正式采购订单。询价的供应商范围和审批责任人需要负责人指定。\n\n**本轮行动结果：已登记物料需求单**\n\n已保存业务单据：1 张；待保存的下游草稿入口：0 个。\n\n原因：采购需求已登记；下方为真实物料需求单，重复需求复用原单。\n\n下一步：打开物料需求单核对并提交 → 创建询价单 → 收集供应商报价并比价 → 采购草稿申请审批 → 批准后提交采购订单。\n\n物料需求单：MAT-MR-2026-00004（已保存，未提交）",
+  "material_request": "MAT-MR-2026-00004",
+  "qty": 17.0,
+  "docstatus": 0,
+  "at": "2026-10-31 16:36:34.409409"
+}

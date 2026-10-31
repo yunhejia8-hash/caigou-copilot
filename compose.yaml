@@ -8,8 +8,8 @@ x-app: &app
     - logs:/home/frappe/frappe-bench/logs
   environment: &environment
     SITE_NAME: focus.local
-    ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
-    ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+    ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.openai-next.com}
+    ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-gpt-6.1-sol}
     ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
 
 services:

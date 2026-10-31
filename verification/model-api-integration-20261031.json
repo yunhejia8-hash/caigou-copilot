@@ -1,0 +1,12 @@
+{
+  "status": "PASS",
+  "base_url": "https://api.openai-next.com",
+  "model": "gpt-6.1-sol",
+  "tool_call": true,
+  "tool_result_roundtrip": true,
+  "data": "synthetic_only",
+  "repository_tests_passed": 10,
+  "agent_tests_passed": 51,
+  "compose_configuration": "PASS",
+  "credential_scan": "PASS"
+}

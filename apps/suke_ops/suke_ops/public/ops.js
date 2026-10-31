@@ -21,7 +21,10 @@
     try {
       await frappe.require(['/assets/suke_ops/hub.js', '/assets/suke_ops/hub.css']);
       // 资源加载期间可能切换或修改单据，不将旧上下文带到新页面。
-      if (frm.doc.name !== name || frm.is_dirty()) return;
+      const route = frappe.get_route();
+      if (frm.doc.name !== name || frm.is_dirty() ||
+          route[0] !== 'Form' || route[1] !== frm.doc.doctype || route[2] !== name ||
+          typeof cur_frm === 'undefined' || cur_frm !== frm) return;
       const dialog = new frappe.ui.Dialog({title: '采购对话 · ' + name, size: 'extra-large', fields: [{fieldname: 'chat', fieldtype: 'HTML'}]});
       const hub = new frappe.SupplyHub({main: dialog.fields_dict.chat.$wrapper}, {[frm.doc.doctype === 'Purchase Order' ? 'orderName' : 'caseName']: name, onNavigate: () => dialog.hide()});
       frm.purchase_chat = {caseName: name, dialog, hub};

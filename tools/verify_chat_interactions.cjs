@@ -69,6 +69,16 @@ const overviewHub = new Hub({main:{}},'data');
 overviewHub.data=dataHub.data;
 overviewHub.render();
 assert.ok(node('.hub-summary').markup.includes('/desk/stock/operations-data-stock'), '总览卡片进入模块数据');
+context.frappe.markdown = value => value;
+let openedDocument;
+context.frappe.set_route = (...route) => { openedDocument = route.flat(); };
+const demandHub = new Hub({main:{}}, 'chat', 'buying-demand');
+demandHub.turns = [{name:'turn-demand', question:'采购17件', answer:'需求已登记', state:'done',
+    documents:[{doctype:'Material Request',name:'MAT-REQ-TEST'}]}];
+demandHub.renderMessages();
+assert.ok(node('.hub-messages').markup.includes('打开物料需求单 MAT-REQ-TEST'));
+demandHub.host.handlers['click:[data-doctype]']({currentTarget:{dataset:{doctype:'Material Request',docname:'MAT-REQ-TEST'}}});
+assert.deepEqual(openedDocument, ['Form', 'Material Request', 'MAT-REQ-TEST']);
 hub=new Hub({main:{}});
 hub.renderMessages=function(){};
 hub.data={model_ready:true}; hub.restoring=false;

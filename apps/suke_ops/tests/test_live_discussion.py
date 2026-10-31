@@ -5,6 +5,18 @@ from suke_ops.live_discussion import evidence, discuss, source_records
 
 
 class DiscussionTests(unittest.TestCase):
+    def test_preloads_count_towards_forty_read_limit(self):
+        for count in (3, 4):
+            def provider(system, messages, tools):
+                if isinstance(messages[-1]['content'], str):
+                    return {'content': [{'type': 'tool_use', 'id': str(i), 'name': 'read_evidence',
+                             'input': {'evidence_id': 'E0' + str(i + 1)}} for i in range(count)]}
+                return {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '已核对'}]}
+            result = discuss(evidence(0, True), '核对', lambda rows: None, provider)
+            reads = [row for row in result['events'] if row['kind'] == 'query']
+            self.assertLessEqual(len(reads), 40)
+            self.assertEqual(result['partial'], count == 4)
+
     def test_evidence_is_server_selected(self):
         self.assertEqual(evidence(0)['calculation']['free_stock'], 220)
         self.assertIsNone(evidence(0)['calculation']['expedite_incremental_cost_if_approved'])

@@ -58,6 +58,41 @@ test('opening dialog refuses unsaved or dirty forms before loading resources', a
     handlers['Supply Case'].refresh(frm);await buttons['采购对话']();
     assert.equal(loads,0);assert.match(messages[0],/先保存/);
 });
+
+test('resource loading never opens a stale form dialog after navigation', async () => {
+    for (const leave of [false, true]) {
+        const handlers = {}, buttons = {}; let resolveLoad, opened = 0;
+        let route = ['Form', 'Purchase Order', 'PO-001'];
+        const frappe = {utils: {escape_html: String}, get_route: () => route,
+            ui: {form: {on: (type, h) => {if (!handlers[type]) handlers[type] = h;}}, Dialog: class {
+                constructor() {this.fields_dict = {chat: {$wrapper: {}}};} show() {opened++;}
+            }}, require: () => new Promise(resolve => {resolveLoad = resolve;}),
+            SupplyHub: class {}, msgprint: () => {}};
+        const frm = {doc: {doctype: 'Purchase Order', name: 'PO-001'}, is_new: () => false,
+            is_dirty: () => false, add_custom_button: (name, fn) => {buttons[name] = fn;}};
+        const context = {frappe, cur_frm: frm}; vm.createContext(context);
+        vm.runInContext(fs.readFileSync(path.join(publicDir, 'ops.js'), 'utf8'), context);
+        handlers['Purchase Order'].refresh(frm);
+        const loading = buttons['到货跟踪与采购对话']();
+        if (leave) {route = ['Form', 'Purchase Order', 'PO-002']; context.cur_frm = {doc: {name: 'PO-002'}};}
+        resolveLoad(); await loading;
+        assert.equal(opened, leave ? 0 : 1);
+    }
+});
+
+test('failed discussions restore saved evidence and synthetic boundary', async () => {
+    const {Hub} = environment(), h = sender(Hub);
+    h.calls = []; h.call = async method => {
+        h.calls.push(method);
+        assert.equal(method, 'history');
+        return [{name: 'FAILED', state: 'failed', synthetic: true,
+            events: [{kind: 'failed', summary: '查询未完成'}]}];
+    };
+    await h.restore();
+    assert.deepEqual(h.calls, ['history']);
+    assert.equal(h.turns[0].synthetic, true);
+    assert.equal(h.turns[0].events.length, 1);
+});
 test('upstream module constructor and purchase order context stay isolated',()=>{
  const {Hub}=environment();Hub.prototype.refresh=Hub.prototype.restore=()=>{};
  const stock=new Hub({main:{}},'chat','stock'),data=new Hub({main:{}},'data','buying');
