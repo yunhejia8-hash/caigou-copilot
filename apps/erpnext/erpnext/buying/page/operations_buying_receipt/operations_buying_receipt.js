@@ -1,6 +1,6 @@
 frappe.pages['operations-buying-receipt'].on_page_load = function(wrapper) {
     const page = frappe.ui.make_app_page({parent: wrapper, title: '入库工作台', single_column: true});
-    frappe.require(['/assets/suke_ops/hub.css?v=home-v6.css', '/assets/suke_ops/hub.js?v=home-v6.js'], () => {
+    frappe.require(['/assets/suke_ops/hub.css?v=procurement-qa-v1.css', '/assets/suke_ops/hub.js?v=procurement-qa-v1.js'], () => {
         wrapper.supply_hub = new frappe.SupplyHub(page, 'chat', 'buying-receipt');
     });
 };

@@ -30,6 +30,46 @@ def demand_from(texts):
     return fields, ambiguities+invalid, engine
 
 
+def update_quotes(existing, text):
+    """Apply a supplier-scoped amendment without ever re-parsing the application."""
+    if quotes.model_enabled():
+        source = ('已有报价（保留未修改字段）：'+json.dumps(existing,ensure_ascii=False)+
+                  '\n本次补充：'+text+
+                  '\n仅返回被明确修改的供应商的完整报价；共同条款仅在明确说两家/均/全部时应用。'
+                  '保持原供应商全名，不新增供应商，不把计算公式当作新的单价。')
+        patches = quotes.model_quotes(source)
+    else:
+        patches = [{k:v for k,v in q.items() if v is not None and not (k=='tax' and v=='未知')}
+                   for q in quotes.local_quotes(text) if q.get('supplier')]
+        common = bool(re.search(r'均|两家|全部', text))
+        payment = re.search(r'付款条件(?:均)?(?:为|是|[：:])\s*([^。；;\n]+)', text)
+        for old in ([] if patches else existing):
+            if not common and old.get('supplier','') not in text:
+                continue
+            patch = {'supplier':old['supplier']}
+            if payment:patch['payment']=payment[1].strip()
+            patches.append(patch)
+    names = [q.get('supplier') for q in existing]
+    if len(set(names)) != len(names) or any(q.get('supplier') not in names for q in patches):
+        raise ValueError('无法唯一匹配供应商，请按供应商全名提供完整新版报价。')
+    result = [dict(q) for q in existing]
+    changed = False
+    seen = set()
+    for patch in patches:
+        supplier = patch['supplier']
+        if supplier in seen:
+            raise ValueError('同一供应商存在多个修改版本，请明确最终报价。')
+        seen.add(supplier)
+        index = names.index(supplier)
+        updates = {k:v for k,v in patch.items() if v is not None and k != 'evidence'}
+        changed = changed or any(result[index].get(k)!=v for k,v in updates.items())
+        result[index].update(updates)
+        result[index]['evidence'] = str(existing[index].get('evidence') or '')+'\n补充：'+text
+    if not changed:
+        raise ValueError('未识别到明确的报价修改，请按供应商全名提供需修改字段或完整新版报价。')
+    return [quotes.validate_quote(q) for q in result]
+
+
 def run(operation, texts, fields=None, image_quotes=None):
     if operation not in ('procurement_intake','procurement_compare','procurement_search'):
         raise ValueError('未授权采购工具')
@@ -74,5 +114,5 @@ def run(operation, texts, fields=None, image_quotes=None):
     result.update(quotes=rows,source_text=source,comparable_count=len(eligible),
                   lowest_total=minimum if len(eligible)>=2 else None,
                   lowest_sources=[r['source'] for r in eligible if r['total']==minimum] if len(eligible)>=2 else [],
-                  comparison_note='仅对条件齐全、符合需求的报价比较含税单价×数量+运费。不换算单位、不补税或运费。不新增综合评分。只使用最近一条含供应商标记的报价消息，修改报价请给出完整新版。')
+                  comparison_note='仅对条件齐全、符合需求的报价比较单价×数量×明确税率系数+含税运费。未税价仅按明确税率换算；缺失税率、运费或单位换算关系时须补充。请核对供应商、规格和付款条件后再比价。')
     return result

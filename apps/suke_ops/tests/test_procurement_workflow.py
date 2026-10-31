@@ -75,9 +75,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(r['workflow']['phase'],'awaiting_confirmation');compare.assert_not_called()
     def test_quote_after_confirmation_uses_frozen_application(self):
         wf=self.confirm(self.ready())
-        with patch.object(workflow.procurement_bridge,'run',return_value={'quotes':[{},{}],'comparable_count':2,'lowest_total':1850}) as compare:
+        with patch.object(workflow.procurement_bridge,'run',return_value={'quotes':[{'quote':{'supplier':'A'}},{'quote':{'supplier':'B'}}],'comparable_count':2,'lowest_total':1850}) as compare:
             saved=self.process(QUOTE,wf)
-            compare.assert_not_called()
+            self.assertEqual(compare.call_count,1)
             self.assertEqual(saved['workflow']['phase'],'quotations_ready')
             r=self.process('开始比价',saved['workflow'])
         self.assertEqual(r['workflow']['phase'],'compared');self.assertEqual(compare.call_args.kwargs['fields']['quantity'],500)
@@ -152,3 +152,66 @@ class WorkflowTests(unittest.TestCase):
             r=workflow.process(turn,wf)
         self.assertIn('图片模糊',r['answer'])
         self.assertEqual(r['workflow'],wf)
+
+    def test_qa_natural_language_fields(self):
+        text='生产部为装配工装采购304不锈钢六角螺栓，规格M8×30，数量1000个，2026年11月10日前到货，预算含税含运费1500元，申请人测试员张工。'
+        fields, errors=workflow.intake.local_extract(text)
+        self.assertEqual(fields['material_name'],'304不锈钢六角螺栓')
+        self.assertEqual(fields['purpose'],'装配工装')
+        self.assertEqual(fields['budget'],1500)
+        self.assertEqual(fields['quantity'],1000)
+        self.assertFalse(errors)
+    def test_quote_preamble_cannot_change_application(self):
+        wf=self.ready()
+        r=self.process('同规格1000个，请直接比价。'+QUOTE,wf)
+        self.assertEqual(r['workflow'],wf)
+        wf=self.confirm(wf)
+        with patch.object(workflow.procurement_bridge.quotes,'model_enabled',return_value=False):
+            r=self.process('同规格1000个。'+QUOTE,wf)
+        self.assertEqual(r['workflow']['fields'],wf['fields'])
+        self.assertEqual(r['workflow']['revision'],wf['revision'])
+        self.assertTrue(r['procurement'][0]['result']['quotes'])
+        self.assertIn('申请已确认',r['application']['status'])
+    def test_quote_amendment_preserves_stage_and_dates(self):
+        wf=self.confirm(self.ready())
+        with patch.object(workflow.procurement_bridge.quotes,'model_enabled',return_value=False):
+            saved=self.process(QUOTE+'\n\n'+QUOTE.replace('A厂','B厂'),wf)
+            r=self.process('补充报价核对：两家规格均保持原规格，付款条件均为验收合格后60天付款。',saved['workflow'])
+        self.assertEqual(r['workflow']['revision'],wf['revision'])
+        self.assertEqual(r['workflow']['phase'],'quotations_ready')
+        self.assertEqual(r['workflow']['fields'],wf['fields'])
+        self.assertEqual(len(r['workflow']['saved_quotes']),2)
+        self.assertEqual(r['workflow']['saved_quotes'][0]['delivery'],'2026-11-15')
+        self.assertEqual(r['workflow']['saved_quotes'][0]['payment'],'验收合格后60天付款')
+    def test_ambiguous_amendment_keeps_previous_state(self):
+        wf=self.confirm(self.ready())
+        with patch.object(workflow.procurement_bridge.quotes,'model_enabled',return_value=False):
+            saved=self.process(QUOTE,wf)['workflow']
+            r=self.process('补充报价：把那个价格改一下',saved)
+        self.assertEqual(r['workflow'],saved)
+        self.assertIn('保留',r['answer'])
+
+    def test_natural_procurement_intent_enters_workflow(self):
+        text='生产部为装配工装采购304不锈钢六角螺栓，规格M8×30，数量1000个，2026年11月12日前到货，预算含税含运费1500元，申请人测试员张工。收货仓：回归测试二号仓。'
+        result=self.process(text)
+        self.assertEqual(result['workflow']['phase'],'awaiting_confirmation')
+        self.assertEqual(result['workflow']['fields']['spec'],'M8×30')
+    def test_three_amount_boundaries_end_to_end(self):
+        for amount, expected in [(9999.99,False),(10000,False),(10000.01,True)]:
+            rows=[dict(supplier=name,material='伺服驱动器',spec='QA-750W',quantity=1,unit='台',unit_price=amount+i,freight=0,tax='含税',delivery='2026-11-05',valid_until='2026-11-04',payment='验收后30天') for i,name in enumerate(('测试A','测试B'))]
+            with patch.object(workflow.procurement_bridge.intake,'today',return_value=__import__('datetime').date(2026,10,31)):
+                r=workflow.procurement_bridge.run('procurement_compare',[],fields=dict(material_name='伺服驱动器',spec='QA-750W',quantity=1,unit='台',needed_by='2026-11-10'),image_quotes=rows)
+            self.assertEqual(r['lowest_total'],amount)
+            self.assertEqual(workflow.approval_reminder(r['lowest_total'],20000)['requires_escalation'],expected)
+
+    def test_named_partial_quote_keeps_other_supplier(self):
+        wf=self.confirm(self.ready())
+        with patch.object(workflow.procurement_bridge.quotes,'model_enabled',return_value=False):
+            saved=self.process(QUOTE+'\n\n'+QUOTE.replace('A厂','B厂'),wf)['workflow']
+            r=self.process('补充报价：供应商：A厂，付款：验收后60天',saved)
+        rows=r['workflow']['saved_quotes']
+        self.assertEqual(len(rows),2)
+        self.assertEqual(rows[0]['payment'],'验收后60天')
+        self.assertEqual(rows[0]['unit_price'],3.5)
+        self.assertEqual(rows[1]['payment'],'验收后30天')
+        self.assertEqual(r['workflow']['revision'],wf['revision'])

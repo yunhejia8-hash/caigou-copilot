@@ -49,6 +49,7 @@ def preflight(fields, issues=(), duplicates=()):
             result['state'] = 'needs_info'
     result['history_note'] = '原预审规则已执行；当前尚未迁移原采购历史库，历史数量/价格缺少可核验来源时保留人工复核。'
     result['department_budget_checked'] = False
+    result['warnings'].append('收货仓为申请人填写的拟用仓库，尚未核实ERP仓库主数据；正式建单前须匹配公司与仓库。')
     return result
 
 
@@ -112,7 +113,7 @@ def create_pdf(wf, turn_name):
 def document(wf):
     pdf = wf.get('pdf')
     return {'id':wf['id'],'revision':wf['revision'],'phase':wf['phase'], 'preflight_state':wf['preflight']['state'],
-            'status':LABELS[wf['preflight']['state']],
+            'status':{'inquiry':'申请已确认 · 询价中','quotations_ready':'申请已确认 · 报价待核对','compared':'申请已确认 · 比价完成'}.get(wf['phase'],LABELS[wf['preflight']['state']]),
             'preview_url': '/api/method/suke_ops.procurement_workflow.application_pdf?name='+pdf['turn'] if pdf else None,
             'download_url':'/api/method/suke_ops.procurement_workflow.application_pdf?download=1&name='+pdf['turn'] if pdf else None}
 
@@ -127,6 +128,7 @@ def process(turn, prior=None):
     text = turn.question.strip()
     prior = prior if prior is not None else previous_workflow(turn.conversation, turn.creation)
     is_procurement = bool(re.search(r'需要|我要采购|采购需求|供应商[：:]|生成申请|申请表|询价|比价|查价|购买|买[0-9一二三四五六七八九十]',text))
+    is_procurement = is_procurement or bool(re.search('采购',text) and re.search('数量|规格|预算|预审',text))
     if not prior and not is_procurement:
         return None
     # Existing ERP order analytics continue to use their original tools.
@@ -146,10 +148,12 @@ def process(turn, prior=None):
             return pack(wf, '图片识别未完成：'+str(error))
         if not rows:
             return pack(wf, '图片中未识别到报价，请上传清晰的报价单或补充文字。')
-        if len(wf.get('image_quotes', [])) + len(rows) > 20:
+        if len(wf.get('saved_quotes', wf.get('image_quotes', []))) + len(rows) > 20:
             return pack(wf, '最多支持20份报价，请整理后用完整报价文字替换。')
         wf['quote_images'] = wf.get('quote_images', []) + [image]
-        wf['image_quotes'] = wf.get('image_quotes', []) + rows
+        wf['image_quotes'] = wf.get('saved_quotes', wf.get('image_quotes', [])) + rows
+        wf.pop('saved_quotes', None)
+        wf.pop('quote_source', None)
         wf.update(phase='quotations_ready', quote_turn=turn.name)
         wf.pop('approval_reminder', None)
         preview = procurement_bridge.run('procurement_compare', [], fields=wf['fields'], image_quotes=wf['image_quotes'])
@@ -161,13 +165,43 @@ def process(turn, prior=None):
         wf['phase'] = 'inquiry'
         wf['confirmed_at'] = str(now_datetime())
         return pack(wf,'申请已确认，进入询价。请粘贴供应商报价（用空行分隔），或点击“发送报价图片”。')
+    quote_hint = bool(re.search(r'供应商|报价|付款|税率|含税|未税',text))
+    change = r'(?:数量|预算|物料|规格|收货仓|需求日期|用途)(?:调整为|改为|改成|变更为)'
+    demand_change = bool(re.search(r'(?:需求|申请|采购)'+change,text) or re.search(r'预算(?:调整为|改为|改成)',text) or (not quote_hint and re.search(change,text)))
+    quote_message = quote_hint and not demand_change and not re.search('网上|联网|查价',text)
+    if prior and quote_message and wf['phase'] == 'awaiting_confirmation':
+        return pack(wf,'申请表已生成，请先预览并确认，再输入询价结果。')
+    if prior and quote_message and wf['phase'] in ('inquiry','quotations_ready','compared'):
+        try:
+            if re.search(r'供应商[：:]',text) and not (re.search('补充|更新|修改|调整',text) and (wf.get('saved_quotes') or wf.get('image_quotes') or wf.get('quote_source'))):
+                preview = procurement_bridge.run('procurement_compare',[text],fields=wf['fields'])
+                rows = [row['quote'] for row in preview.get('quotes',[])]
+            else:
+                rows = wf.get('saved_quotes') or wf.get('image_quotes')
+                if not rows and wf.get('quote_source'):
+                    previous = procurement_bridge.run('procurement_compare',[wf['quote_source']],fields=wf['fields'])
+                    rows = [row['quote'] for row in previous.get('quotes',[])]
+                if not rows:
+                    return pack(wf,'请先按供应商全名录入报价，各供应商用空行分隔。')
+                rows = procurement_bridge.update_quotes(rows,text)
+                preview = procurement_bridge.run('procurement_compare',[],fields=wf['fields'],image_quotes=rows)
+        except ValueError as error:
+            return pack(wf,str(error)+' 原申请和报价已保留。')
+        if not rows:
+            return pack(wf,'未提取到有效报价，原申请和报价已保留，请补充供应商报价。')
+        wf.update(saved_quotes=rows,quote_source=text,quote_turn=turn.name,phase='quotations_ready')
+        for key in ('image_quotes','quote_images','approval_reminder'):
+            wf.pop(key,None)
+        return pack(wf,'报价已更新，请核对下表后点击“开始比价”。申请确认状态保持不变。',[{'tool':'quote_preview','result':preview}])
     preamble = re.split(r'供应商[：:]',text,maxsplit=1)[0].strip()
     patch, issues = {}, []
     if preamble and not re.search(r'^(请)?(再|重新|重试)?(查价|比价|确认申请|预览|下载)',preamble):
         patch, issues = intake.local_extract(preamble)
         # Explicit fields can be supplemented with natural language when rules cannot understand it.
-        if not patch and (not prior or wf['phase'] in ('needs_info','needs_clarification','blocked')):
-            patch, issues, _ = intake.extract(preamble)
+        if (not prior or wf['phase'] in ('needs_info','needs_clarification','blocked')) and not all(({**wf['fields'],**patch}).get(k) for k in ('material_name','quantity','unit','purpose','budget','spec','warehouse','needed_by','applicant','department')):
+            extra, ambiguities, _ = intake.extract(preamble)
+            patch = {**extra,**patch}
+            issues = list(dict.fromkeys(issues+ambiguities))
     changed = any(wf['fields'].get(k) != v for k,v in patch.items())
     needs_review = not wf.get('preflight') or changed or bool(issues)
     if needs_review:
@@ -181,7 +215,7 @@ def process(turn, prior=None):
         check = preflight(fields, issues, duplicate_candidates(wf['id']))
         wf.update(fields=fields,preflight=check,pdf=None,phase=check['state'])
         wf.pop('confirmed_at',None)
-        for key in ('quote_source','image_quotes','quote_images','approval_reminder'):
+        for key in ('quote_source','saved_quotes','image_quotes','quote_images','approval_reminder'):
             wf.pop(key,None)
         if check['state'] in ('passed','review'):
             wf.update(revision=wf['revision']+1,phase='awaiting_confirmation',generated_at=str(now_datetime()))
@@ -195,17 +229,10 @@ def process(turn, prior=None):
         return pack(wf,'预审结果：现有库存与按时在途已满足需求，无需新增采购。')
     if wf['phase'] == 'awaiting_confirmation':
         return pack(wf,'申请表已生成，请先预览并确认，再输入询价结果。')
-    if re.search(r'供应商[：:]',text):
-        # Save inquiry first; a separate explicit step starts comparison.
-        wf.pop('image_quotes',None)
-        wf.pop('quote_images',None)
-        wf.pop('approval_reminder',None)
-        wf.update(quote_source=text,quote_turn=turn.name,phase='quotations_ready')
-        return pack(wf,'询价结果已保存。请核对后点击“开始比价”。')
     if text == '开始比价':
-        if wf['phase'] != 'quotations_ready' or not (wf.get('quote_source') or wf.get('image_quotes')):
+        if wf['phase'] not in ('quotations_ready','compared') or not (wf.get('quote_source') or wf.get('saved_quotes') or wf.get('image_quotes')):
             return pack(wf,'请先录入本笔申请的供应商报价，再开始比价。')
-        result = procurement_bridge.run('procurement_compare',[wf.get('quote_source','')],fields=wf['fields'], **({'image_quotes':wf['image_quotes']} if wf.get('image_quotes') else {}))
+        result = procurement_bridge.run('procurement_compare',[] if wf.get('saved_quotes') else [wf.get('quote_source','')],fields=wf['fields'], **({'image_quotes':wf.get('saved_quotes') or wf['image_quotes']} if wf.get('saved_quotes') or wf.get('image_quotes') else {}))
         wf['phase'] = 'compared' if result.get('comparable_count',0)>=2 else 'quotations_ready'
         answer = f"已整理 {len(result.get('quotes',[]))} 份报价。"
         if result.get('lowest_total') is not None:

@@ -80,7 +80,7 @@ def local_extract(text):
     if len(codes)>1: return {},['请把不同物料分成两次申请，每次描述一种物料。']
     if codes: out['material_id']=codes[0].upper()
     patterns={
-        'budget':r'(?:预算(?:上限)?|预算改为|预算调整为)\s*(?:为|是|约|[:：]|改为|改成)?\s*'+N+r'\s*(?:元|块)?',
+        'budget':r'(?:预算(?:上限)?(?:含税含运费|含税含运|含税)?|预算改为|预算调整为)\s*(?:为|是|约|[:：]|改为|改成)?\s*'+N+r'\s*(?:元|块)?',
         'unit_price':r'(?:采购单价|采购进价|进价|暂估单价|单价)\s*(?:为|是|约|[:：]|改为|改成)?\s*'+N,
         'available_stock':r'(?:当前可用库存|可用库存|当前库存|库存)\s*(?:为|是|有|剩余|[:：]|改为|改成)?\s*'+N+r'\s*'+U+'?',
         'on_time_incoming':r'(?:按时在途|按时到货(?:的)?在途|在途(?:量)?)\s*(?:为|是|有|[:：]|改为|改成)?\s*'+N+r'\s*'+U+'?',
@@ -136,6 +136,13 @@ def local_extract(text):
     }.items():
         m=re.search(pattern,text)
         if m:out[key]=m[1].strip()
+    intent = re.search(r'为([^，,。；;\n]{1,40})采购([^，,。；;\n]{1,80})', text)
+    if intent:
+        out.setdefault('purpose', intent[1].strip())
+        out.setdefault('material_name', intent[2].strip())
+    if not out.get('unit'):
+        unit = re.search(r'单位[：:]\s*'+U, text)
+        if unit: out['unit'] = unit[1]
     if production:out['purpose']=production[0]
     if 'department' not in out:
         m=re.search(r'(生产部|研发部|行政部|维修部|销售部|采购部|计划部|运营部)',text)

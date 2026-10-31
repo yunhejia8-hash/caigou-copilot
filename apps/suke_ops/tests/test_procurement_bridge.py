@@ -58,6 +58,19 @@ class BridgeTests(unittest.TestCase):
     def test_arbitrary_tool_blocked(self):
         with self.assertRaises(ValueError):bridge.run('place_order',[DEMAND])
 
+    def test_explicit_tax_rate_cost_and_invalid_rates(self):
+        quote=QUOTE.replace('单价：3.5','未税单价：3.5').replace('，含税','，税率：13%')
+        r=bridge.run('procurement_compare',[quote],fields=FIELDS)
+        self.assertEqual(r['quotes'][0]['total'],2077.5)
+        self.assertEqual(r['quotes'][0]['issues'],[])
+        missing=bridge.run('procurement_compare',[quote.replace('税率：13%','')],fields=FIELDS)
+        self.assertIsNone(missing['quotes'][0]['total'])
+        for rate in (-1,101,float('nan')):
+            with self.assertRaises(ValueError):bridge.quotes.validate_quote({'tax_rate':rate})
+    def test_inclusive_price_not_taxed_twice(self):
+        r=bridge.run('procurement_compare',[QUOTE+'，税率：13%'],fields=FIELDS)
+        self.assertEqual(r['quotes'][0]['total'],1850)
+
 class ProviderTests(unittest.TestCase):
     def test_tool_outputs_preserve_calls_and_reasoning(self):
         out={'output':[{'type':'reasoning','id':'r1','summary':[],'encrypted_content':'opaque'}, {'type':'function_call','call_id':'c1','name':'read','arguments':'{}'}]}
@@ -70,3 +83,13 @@ class ProviderTests(unittest.TestCase):
         data=call.call_args.args[0]['input']
         self.assertEqual([x['type'] for x in data],['reasoning','function_call','function_call_output'])
         self.assertEqual(data[-1]['call_id'],'c1')
+
+class ManufacturingRegression(unittest.TestCase):
+    def test_expired_late_wrong_unit_and_spec_are_not_ranked(self):
+        row=dict(supplier='测试A',material='轴承',spec='6205-2RS',quantity=100,unit='个',unit_price=10,freight=0,tax='含税',delivery='2026-11-05',valid_until='2026-11-04',payment='月结30天')
+        fields=dict(material_name='轴承',spec='6205-2RS',quantity=100,unit='个',needed_by='2026-11-10')
+        for patch_fields in ({'valid_until':'2026-10-30'},{'delivery':'2026-11-20'},{'unit':'盒'},{'spec':'6205-ZZ'}):
+            with patch.object(bridge.intake,'today',return_value=__import__('datetime').date(2026,10,31)):
+                r=bridge.run('procurement_compare',[],fields=fields,image_quotes=[dict(row,**patch_fields)])
+            self.assertEqual(r['comparable_count'],0)
+            self.assertTrue(r['quotes'][0]['issues'])

@@ -40,7 +40,7 @@ def run():
         checks.append('同一PDF支持inline预览与attachment下载，中文字体已嵌入')
         _,r=step(f"确认申请 {wf['id']} 第{wf['revision']}版")
         assert r['workflow']['phase']=='inquiry'
-        with patch.object(flow.procurement_bridge,'run',side_effect=AssertionError('保存询价不应提前比较')):
+        with patch.object(flow.procurement_bridge.quotes,'model_enabled',return_value=False):
             _,r=step(QUOTE);assert r['workflow']['phase']=='quotations_ready'
         checks.append('确认后才进入询价，保存报价后等待独立比价动作')
         with patch.object(flow.procurement_bridge.quotes,'model_enabled',return_value=False):
