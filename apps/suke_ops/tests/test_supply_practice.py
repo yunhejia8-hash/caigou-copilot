@@ -111,7 +111,7 @@ class PracticeTests(unittest.TestCase):
                   savepoint=lambda *a: self.calls.append('savepoint'),
                   rollback=lambda **k: self.calls.append('rollback'),
                   sql=self.sql)
-        f.get_doc = lambda doctype, name=None: Doc(**doctype) if isinstance(doctype, dict) else self.docs[doctype, name]
+        f.get_doc = lambda doctype, name=None, **kw: Doc(**doctype) if isinstance(doctype, dict) else self.docs[doctype, name]
         f.get_list = self.listing
         f.get_all = lambda *a, **k: [NS(name='QUALITY-BIN')]
         utils = NS(getdate=lambda v: date.fromisoformat(v), nowdate=lambda: '2026-11-01',
@@ -274,7 +274,8 @@ class PracticeTests(unittest.TestCase):
 
     def test_summary_uses_live_inventory_and_does_not_double_count_finished_sales(self):
         api = ModuleType('suke_ops.api')
-        api.snapshot = lambda case, scope: self.ctx
+        api.snapshot = lambda case, scope, **kw: self.ctx
+        api._snapshot_rows = lambda *args, **kw: self.f.get_all(*args, **kw)
         api._scope_read = lambda doc: doc.check_permission('read')
         with patch.dict(sys.modules, {'suke_ops.api': api}):
             result = self.module.summary(self.case)

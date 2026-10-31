@@ -28,10 +28,12 @@ class HubResolutionTests(unittest.TestCase):
         self.f = ModuleType('frappe')
         self.f.session = NS(user='buyer')
         self.f.PermissionError = Denied
+        self.f.ValidationError = Invalid
+        self.f.DoesNotExistError = type('Missing', (Invalid,), {})
         self.f.whitelist = lambda *a, **kw: lambda fn: fn
         self.f.throw = lambda message, exception=Invalid: self.fail_with(message, exception)
         self.f.get_cached_value = lambda dt, name, field: {'user_type': 'System User', 'enabled': 1}[field]
-        self.f.get_doc = lambda dt, name: self.docs[name]
+        self.f.get_doc = lambda dt, name, **kw: self.docs[name]
         self.f.db = NS(sql=self.lock, set_value=self.save, savepoint=self.savepoint, rollback=self.rollback)
         utils = NS(cint=int, flt=float, now_datetime=lambda: None, nowdate=lambda: '')
         path = Path(__file__).resolve().parents[1] / 'suke_ops' / 'hub.py'
@@ -242,7 +244,7 @@ class HubResolutionTests(unittest.TestCase):
             if all(getattr(doc, key, None) == value for key, value in filters.items())), None)
         self.hub.now_datetime = lambda: '2026-11-01 09:00:00'
 
-        def get_doc(doctype, name=None):
+        def get_doc(doctype, name=None, **kwargs):
             if not isinstance(doctype, dict):
                 self.assertEqual(doctype, 'Agent Turn')
                 return self.docs[name]
@@ -263,6 +265,28 @@ class HubResolutionTests(unittest.TestCase):
         return self.hub.open_supply_practice(**{
             'conversation': 'b3ecf00f-1b31-4e90-9b1f-72ed3b8eaa01',
             'request_id': '7d848b7c-8cf9-46bd-9e13-7b2b3605c101', **overrides})
+
+    def test_advertised_bear_client_version_passes_the_http_gate(self):
+        self.f.local = NS(request=NS(method='POST'))
+        with patch.object(self.hub.runtime, 'configured', side_effect=[True, False]), \
+                patch.object(self.hub, 'practice_available', return_value=False):
+            status = self.hub.chat_status()
+            self.assertTrue(status['model_ready'])
+            # 状态读取后配置消失时，应到达模型配置校验，而不是拒绝刚声明的协议。
+            with self.assertRaisesRegex(Invalid, '尚未配置模型服务'):
+                self.hub.start('查询采购订单', client_version=status['client_version'])
+        self.assertEqual(self.writes, [])
+
+    def test_invalid_or_missing_optional_practice_does_not_break_chat_status(self):
+        practice = NS(current_case=Mock())
+        with patch.object(suke_ops, 'supply_practice', practice, create=True), \
+                patch.object(self.hub.runtime, 'configured', return_value=True):
+            for error in (Invalid('注册已失效'), self.f.DoesNotExistError('来源已删除'), Denied('不可读取')):
+                with self.subTest(error=type(error).__name__):
+                    practice.current_case.side_effect = error
+                    status = self.hub.chat_status()
+                    self.assertTrue(status['model_ready'])
+                    self.assertFalse(status['practice_available'])
 
     def test_registered_practice_returns_completed_owned_turn_and_actual_read_provenance_without_model(self):
         self.prepare_practice_endpoint()

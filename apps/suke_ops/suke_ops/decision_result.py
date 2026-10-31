@@ -95,15 +95,15 @@ def _is_demo(case):
     return bool(case.is_simulation or str(case.item_code).startswith('SUKE-') or '演示' in str(case.company))
 
 
-def _practice(case):
-    value = supply_practice.context(case)
+def _practice(case, *, for_update=False):
+    value = supply_practice.lock_case(case) if for_update else supply_practice.context(case)
     if value and value.get('registered') is not True:
         frappe.throw('隔离演练未取得有效服务器注册')
     return value
 
 
-def _check_practice_order(case, po, expected):
-    current = supply_practice.check_order(case, po)
+def _check_practice_order(case, po, expected, *, for_update=False):
+    current = supply_practice.check_order(case, po, **({'for_update': True} if for_update else {}))
     if (not current or current.get('registered') is not True
             or any(current.get(key) != expected.get(key) for key in ('dataset_id', 'site', 'version'))):
         frappe.throw('隔离演练注册状态或版本已变化，不能继续提交采购单')
@@ -121,13 +121,14 @@ def _check_po(po, case):
     return po
 
 
-def _approved_orders(case):
-    practice = _practice(case)
+def _approved_orders(case, *, for_update=False):
+    lock_options = {'for_update': True} if for_update else {}
+    practice = _practice(case, for_update=for_update)
     if not case.purchase_order or (_is_demo(case) and not practice):
         return []
-    po = _check_po(frappe.get_doc('Purchase Order', case.purchase_order), case)
+    po = _check_po(frappe.get_doc('Purchase Order', case.purchase_order, **lock_options), case)
     if practice:
-        _check_practice_order(case, po, practice)
+        _check_practice_order(case, po, practice, for_update=for_update)
     if po.docstatus not in (0, 1) or po.status in ('Closed', 'Cancelled', 'Completed'):
         return []
     signature = approval.document_hash(po)
@@ -136,7 +137,7 @@ def _approved_orders(case):
         fields=['name'], order_by='modified desc', limit_page_length=1)
     if not rows:
         return []
-    approved = frappe.get_doc('Operations Approval', rows[0].name)
+    approved = frappe.get_doc('Operations Approval', rows[0].name, **lock_options)
     approved.check_permission('read')
     if (approved.source_type != 'Purchase Order' or approved.source_name != po.name
             or approved.workflow_state != '已批准' or approved.source_hash != signature):
@@ -173,7 +174,7 @@ def _case_name(result):
     return names[0] if len(names) == 1 else None
 
 
-def build(turn, result):
+def build(turn, result, *, for_update=False):
     """Read current authorities, never infer a real case from the chat wording."""
     _owner(turn)
     if result.get('synthetic') or (result.get('verified_evidence') or result.get('scenario') or {}).get('synthetic'):
@@ -189,9 +190,10 @@ def build(turn, result):
         return card
     card = _empty('erp')
     try:
-        case = api.read_case(name)
-        practice = _practice(case)
-        analysis = api.get_analysis(name, scope=SCOPE)
+        lock_options = {'for_update': True} if for_update else {}
+        case = api.read_case(name, **lock_options)
+        practice = _practice(case, for_update=for_update)
+        analysis = api._get_analysis(name, scope=SCOPE, for_update=True) if for_update else api.get_analysis(name, scope=SCOPE)
         stock_uom = analysis['context'].get('stock_uom')
         card.update(case={'name': case.name, 'item_code': case.item_code, 'warehouse': case.warehouse,
                           'is_simulation': _is_demo(case), 'purchase_order': case.purchase_order,
@@ -217,7 +219,7 @@ def build(turn, result):
         planner = frappe.session.user == 'Administrator' or bool(roles & api.PLANNERS)
         card['can']['choose'] = planner and bool(frappe.has_permission('Supply Decision', 'create'))
         if selected:
-            decision = frappe.get_doc('Supply Decision', selected['name'])
+            decision = frappe.get_doc('Supply Decision', selected['name'], **lock_options)
             decision.check_permission('read')
             plan = api.loads(decision.plan_json, {})
             if decision.supply_case != case.name or plan.get('scope') != SCOPE:
@@ -247,7 +249,7 @@ def build(turn, result):
                 card.update(state='blocked', title='方案已驳回，请调整选择或说明')
                 card['requirements'] = [decision.reason]
         try:
-            card['approved_orders'] = _approved_orders(case)
+            card['approved_orders'] = _approved_orders(case, for_update=for_update)
         except frappe.PermissionError:
             card['requirements'].append('没有读取相关采购审批清单的权限；未据此判断订单是否已审批。')
         card['can']['submit_orders'] = any(row['can_submit'] for row in card['approved_orders'])
@@ -275,7 +277,7 @@ def act(turn, result, action, **kwargs):
     if 'reason' in kwargs:
         kwargs['reason'] = _text(kwargs['reason'], '操作说明')
     updated = deepcopy(result)
-    current = build(turn, result) or _empty()
+    current = build(turn, result, for_update=True) or _empty()
     if current['kind'] == 'synthetic':
         frappe.throw('合成讨论只支持演示复核，不能审批或执行真实业务')
     if action == 'bind_case':
@@ -288,8 +290,8 @@ def act(turn, result, action, **kwargs):
     else:
         if not current.get('case') or current['kind'] not in ('erp', 'sandbox'):
             frappe.throw('请先关联可读取的真实供应异常')
-        case = api.read_case(current['case']['name'])
-        practice = _practice(case)
+        case = api.read_case(current['case']['name'], for_update=True)
+        practice = _practice(case, for_update=True)
         if (_is_demo(case) and not practice) or (current['kind'] == 'sandbox' and not practice):
             frappe.throw('合成案例不能执行真实业务')
         if action == 'choose':
@@ -327,7 +329,7 @@ def act(turn, result, action, **kwargs):
                                _text(kwargs.get('reason'), '审批说明') if action == 'reject' or kwargs.get('reason') else None)
         elif action == 'submit_order':
             _submit_order(case, kwargs)
-    updated['resolution'] = build(turn, updated)
+    updated['resolution'] = build(turn, updated, for_update=True)
     history = list(updated.get('resolution_actions') or [])
     history.append({'action': action, 'by': frappe.session.user, 'at': str(now_datetime()),
                     'case': (updated['resolution'].get('case') or {}).get('name'),
@@ -338,7 +340,8 @@ def act(turn, result, action, **kwargs):
 
 
 def _submit_order(case, values):
-    practice = _practice(case)
+    case = api.read_case(case.name, for_update=True)
+    practice = _practice(case, for_update=True)
     if _is_demo(case) and not practice:
         frappe.throw('未注册的合成案例不能提交采购单')
     name = _text(values.get('order_name'), '采购单号', 140)
@@ -346,22 +349,22 @@ def _submit_order(case, values):
     if name != case.purchase_order:
         frappe.throw('采购单不属于本次异常', frappe.PermissionError)
     frappe.db.sql('select name from `tabPurchase Order` where name=%s for update', name)
-    po = _check_po(frappe.get_doc('Purchase Order', name), case)
+    po = _check_po(frappe.get_doc('Purchase Order', name, for_update=True), case)
     locked_practice = supply_practice.lock_case(case)
     if practice and (not locked_practice or locked_practice.get('registered') is not True
                      or any(locked_practice.get(key) != practice.get(key) for key in ('dataset_id', 'site', 'version'))):
         frappe.throw('隔离演练注册状态或版本已变化，不能继续提交采购单')
     if practice:
-        _check_practice_order(case, po, locked_practice)
+        _check_practice_order(case, po, locked_practice, for_update=True)
     elif '演示' in str(po.company) or any(str(row.item_code).startswith('SUKE-') for row in po.items):
         frappe.throw('演示采购单不能从真实执行入口提交')
     if approval.document_hash(po) != expected:
         frappe.throw('采购单内容已变化，原批准不可执行')
-    matching = next((row for row in _approved_orders(case) if row['name'] == name and row['source_hash'] == expected), None)
+    matching = next((row for row in _approved_orders(case, for_update=True) if row['name'] == name and row['source_hash'] == expected), None)
     if not matching:
         frappe.throw('没有与当前采购单内容一致的真实审批')
     frappe.db.sql('select name from `tabOperations Approval` where name=%s for update', matching['approval'])
-    approved = frappe.get_doc('Operations Approval', matching['approval'])
+    approved = frappe.get_doc('Operations Approval', matching['approval'], for_update=True)
     approved.check_permission('read')
     if (approved.workflow_state != '已批准' or approved.source_hash != expected
             or approved.source_type != 'Purchase Order' or approved.source_name != name):

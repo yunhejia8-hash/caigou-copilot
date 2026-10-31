@@ -209,7 +209,7 @@ def dashboard(module='control', view='chat'):
 @frappe.whitelist()
 def chat_status():
     require_user()
-    return {'model_ready': runtime.configured(), 'client_version': 'supply-practice-v1',
+    return {'model_ready': runtime.configured(), 'client_version': 'procurement-approval-v1',
             'practice_available': practice_available()}
 
 
@@ -217,7 +217,7 @@ def practice_available():
     from suke_ops import supply_practice
     try:
         return bool(supply_practice.current_case())
-    except frappe.PermissionError:
+    except (frappe.PermissionError, frappe.ValidationError, frappe.DoesNotExistError):
         return False
 
 
@@ -285,9 +285,9 @@ def install():
     frappe.db.commit()
 
 
-def owned_turn(name):
+def owned_turn(name, *, for_update=False):
     require_user()
-    doc = frappe.get_doc('Agent Turn', name)
+    doc = frappe.get_doc('Agent Turn', name, **({'for_update': True} if for_update else {}))
     if doc.owner != frappe.session.user:
         frappe.throw('只能访问自己的对话。', frappe.PermissionError)
     return doc
@@ -459,16 +459,17 @@ def poll(name):
             **result}
 
 
-def with_resolution(turn, result):
+def with_resolution(turn, result, *, for_update=False):
     """Append server-computed decisions, independently of model prose success."""
     from suke_ops import decision_result
-    resolution = decision_result.build(turn, result)
+    lock_options = {'for_update': True} if for_update else {}
+    resolution = decision_result.build(turn, result, **lock_options)
     updated = {**result, **({'resolution': resolution} if resolution else {})}
     if resolution and resolution.get('kind') == 'sandbox':
         from suke_ops import supply_practice
         from suke_ops.api import read_case
-        case = read_case(resolution['case']['name'])
-        summary = supply_practice.summary(case)
+        case = read_case(resolution['case']['name'], **lock_options)
+        summary = supply_practice.summary(case, **lock_options)
         if summary:
             updated['practice'] = {**summary, 'case_name': case.name, 'company': case.company}
     return updated
@@ -493,7 +494,7 @@ def resolution_action(name, action, plan_id=None, fingerprint=None, reason=None,
     # Ownership is checked before a lock; re-read after locking for concurrent tabs.
     owned_turn(name)
     frappe.db.sql('select name from `tabAgent Turn` where name=%s for update', name)
-    turn = owned_turn(name)
+    turn = owned_turn(name, for_update=True)
     if turn.state not in ('done', 'failed'):
         frappe.throw('请等待本轮讨论结束后操作。')
     from suke_ops import decision_result
@@ -505,7 +506,7 @@ def resolution_action(name, action, plan_id=None, fingerprint=None, reason=None,
     frappe.db.savepoint('discussion_resolution')
     try:
         result = decision_result.act(turn, json.loads(turn.result or '{}'), action, **args)
-        result = with_resolution(turn, result)
+        result = with_resolution(turn, result, for_update=True)
         frappe.db.set_value('Agent Turn', name, 'result', json.dumps(result, ensure_ascii=False, default=str))
     except Exception:
         frappe.db.rollback(save_point='discussion_resolution')

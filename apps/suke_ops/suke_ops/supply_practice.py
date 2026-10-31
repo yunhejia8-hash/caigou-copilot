@@ -65,8 +65,8 @@ def install():
     return {'installed': True, 'doctype': DOCTYPE, 'seeded': False}
 
 
-def _read(doctype, name):
-    doc = frappe.get_doc(doctype, name)
+def _read(doctype, name, *, for_update=False):
+    doc = frappe.get_doc(doctype, name, **({'for_update': True} if for_update else {}))
     doc.check_permission('read')
     return doc
 
@@ -139,10 +139,12 @@ def _silence_seed_outbound():
             frappe.flags.mute_emails = previous_mute
 
 
-def context(case):
+def context(case, *, for_update=False):
     """Only a server registry can grant local practice scope; labels cannot."""
     if frappe.local.site != SITE or not frappe.db.exists('DocType', DOCTYPE):
         return None
+    if for_update:
+        return lock_case(case)
     name = frappe.db.get_value(DOCTYPE, {'supply_case': case.name, 'active': 1}, 'name')
     if not name:
         return None
@@ -239,8 +241,8 @@ def _check_source(row, registered, info):
         frappe.throw('虚拟实操来源行不属于注册仓库')
 
 
-def validate_snapshot(case, ctx):
-    info = context(case)
+def validate_snapshot(case, ctx, *, for_update=False):
+    info = context(case, for_update=for_update)
     if info is None:
         return None
     if ctx.get('item_code') != case.item_code or ctx.get('warehouse') != case.warehouse:
@@ -254,7 +256,7 @@ def validate_snapshot(case, ctx):
             frappe.throw('当前需求或预留包含未注册单据，已停止虚拟实操')
         key = (doctype, name)
         if key not in parents:
-            parents[key] = _read(doctype, name)
+            parents[key] = _read(doctype, name, for_update=for_update)
         parent = parents[key]
         if parent.company != info['company']:
             frappe.throw('当前需求或预留不属于注册虚拟公司')
@@ -275,7 +277,7 @@ def validate_snapshot(case, ctx):
     for demand in ctx.get('demands', []):
         source(demand.get('document_type'), demand.get('document'), demand.get('id'))
     for row in ctx.get('reservations', []):
-        reservation = _read('Stock Reservation Entry', row['id'])
+        reservation = _read('Stock Reservation Entry', row['id'], for_update=for_update)
         if (reservation.company != info['company'] or reservation.item_code != case.item_code
                 or reservation.warehouse != case.warehouse or reservation.voucher_no != row.get('document')
                 or reservation.voucher_detail_no != row.get('demand_id')
@@ -285,8 +287,8 @@ def validate_snapshot(case, ctx):
     return info
 
 
-def check_order(case, po):
-    info = context(case)
+def check_order(case, po, *, for_update=False):
+    info = context(case, for_update=for_update)
     if info is None:
         frappe.throw('该虚拟实操登记已失效，不能继续提交采购单')
     po.check_permission('read')
@@ -314,16 +316,16 @@ def _number(value):
     return number
 
 
-def summary(case):
+def summary(case, *, for_update=False):
     """Only registered local records; live quantities never reset to seed values."""
-    info = context(case)
+    info = context(case, for_update=for_update)
     if info is None:
         return None
-    from suke_ops.api import snapshot
-    ctx = snapshot(case, scope='on_hand_only')
-    validate_snapshot(case, ctx)
+    from suke_ops.api import snapshot, _snapshot_rows
+    ctx = snapshot(case, scope='on_hand_only', for_update=for_update)
+    validate_snapshot(case, ctx, for_update=for_update)
     manifest = info['manifest']
-    quality = _read('Warehouse', manifest['quality_warehouse'])
+    quality = _read('Warehouse', manifest['quality_warehouse'], for_update=for_update)
     if quality.company != info['company']:
         frappe.throw('待检仓不属于本批虚拟公司')
     from suke_ops.api import _scope_read
@@ -331,8 +333,8 @@ def summary(case):
     if not frappe.has_permission('Bin', 'read'):
         frappe.throw('没有读取待检隔离仓库存的权限', frappe.PermissionError)
     held = 0
-    for row in frappe.get_all('Bin', filters={'item_code': case.item_code, 'warehouse': quality.name}, fields=['name']):
-        bin_doc = _read('Bin', row.name)
+    for row in _snapshot_rows('Bin', filters={'item_code': case.item_code, 'warehouse': quality.name}, fields=['name'], for_update=for_update):
+        bin_doc = _read('Bin', row.name, for_update=for_update)
         _scope_read(bin_doc)
         held += _number(bin_doc.actual_qty)
     on_hand = _number(ctx['actual_qty'])

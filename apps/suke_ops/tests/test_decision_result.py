@@ -54,6 +54,8 @@ class FakeFrappe(ModuleType):
         self.docs, self.roles, self.locks = {}, ['Supply Planner', 'Supply Approver'], []
         self.permissions = {}
         self.db = NS(sql=lambda *a, **k: self.locks.append(a), exists=lambda *a, **k: None)
+        self.db.get_values = lambda kind, filters, fields, **kw: self.get_all(
+            kind, filters=filters, **({'pluck': fields} if kw.get('pluck') else {'fields': fields}))
 
     @staticmethod
     def whitelist(*a, **k):
@@ -69,7 +71,7 @@ class FakeFrappe(ModuleType):
     def has_permission(self, doctype, action, doc=None):
         return self.permissions.get((doctype, action), True) and (not doc or action not in doc.denied)
 
-    def get_doc(self, kind, name=None):
+    def get_doc(self, kind, name=None, **kwargs):
         try:
             return self.docs[kind, name]
         except KeyError:
@@ -111,12 +113,12 @@ class DecisionResultTests(unittest.TestCase):
         self.f.docs['Supply Case', 'CASE'] = self.case
         self.f.docs['Purchase Order', 'PO'] = self.po
         self.approval = NS(document_hash=lambda po: digest([po.name, po.grand_total, po.terms]))
-        self.practice = NS(context=lambda case: None, validate_snapshot=lambda case, ctx: None,
-                           check_order=lambda case, po: None)
+        self.practice = NS(context=lambda case: None, validate_snapshot=lambda case, ctx, **kw: None,
+                           check_order=lambda case, po, **kw: None)
         self.practice.lock_case = lambda case: self.practice.context(case)
         self.api = NS(PLANNERS={'Supply Planner', 'Supply Approver', 'System Manager'},
                       loads=lambda value, default=None: json.loads(value) if value else default,
-                      read_case=self.read_case, get_analysis=self.analysis,
+                      read_case=self.read_case, get_analysis=self.analysis, _get_analysis=self.analysis,
                       propose=self.propose, transition=self.transition, execute=self.execute)
         self.proposals, self.executions = 0, 0
         with patch.dict(sys.modules, {'frappe': self.f, 'frappe.utils': self.utils}), \
@@ -125,12 +127,12 @@ class DecisionResultTests(unittest.TestCase):
                 patch.object(suke_ops, 'supply_practice', self.practice, create=True):
             self.mod = load('_decision_result_test', 'decision_result.py')
 
-    def read_case(self, name):
+    def read_case(self, name, **kwargs):
         case = self.f.get_doc('Supply Case', name)
         case.check_permission('read')
         return case
 
-    def analysis(self, name, scope):
+    def analysis(self, name, scope, **kwargs):
         self.assertEqual(scope, 'on_hand_only')
         ctx = deepcopy(self.ctx)
         practice = self.practice.context(self.case)
@@ -350,7 +352,7 @@ class DecisionResultTests(unittest.TestCase):
         entry = {'dataset_id': 'TEST-DATASET', 'registered': True, 'label': '本地隔离演练',
                  'site': 'focus.local', 'version': 'v1'}
         self.practice.context = lambda case: entry
-        self.practice.check_order = lambda case, po: entry
+        self.practice.check_order = lambda case, po, **kw: entry
         return entry
 
     def test_registered_sandbox_keeps_provenance_and_uses_approval_execution_boundary(self):
@@ -398,7 +400,7 @@ class DecisionResultTests(unittest.TestCase):
         entry = self.register_sandbox()
         approved = self.approve_po()
         checked = []
-        def check_order(case, po):
+        def check_order(case, po, **kwargs):
             checked.append(po.name)
             if any(row.item_code != case.item_code or row.warehouse != case.warehouse for row in po.items):
                 raise Denied('Unregistered purchase row')
@@ -420,13 +422,26 @@ class DecisionResultTests(unittest.TestCase):
         entry = self.register_sandbox()
         approved = self.approve_po()
         for replacement in (None, {**entry, 'dataset_id': 'ANOTHER-DATASET'}, {**entry, 'version': 'v2'}):
-            self.practice.check_order = lambda case, po, replacement=replacement: replacement
+            self.practice.check_order = lambda case, po, replacement=replacement, **kw: replacement
             with self.assertRaises(Invalid):
                 self.mod._submit_order(self.case, {'order_name': 'PO', 'source_hash': approved.source_hash})
-        self.practice.check_order = lambda case, po: entry
+        self.practice.check_order = lambda case, po, **kw: entry
         self.practice.lock_case = lambda case: None
         with self.assertRaises(Invalid):
             self.mod._submit_order(self.case, {'order_name': 'PO', 'source_hash': approved.source_hash})
+        self.assertEqual(self.po.submissions, 0)
+
+    def test_order_detached_from_current_case_cannot_be_submitted_from_an_old_snapshot(self):
+        approved = self.approve_po()
+        current = deepcopy(self.case)
+        current.purchase_order = 'PO-B'
+        other = deepcopy(self.po)
+        other.name = 'PO-B'
+        self.f.docs['Purchase Order', 'PO-B'] = other
+        self.api.read_case = lambda name, **options: current if options.get('for_update') else self.case
+        with self.assertRaises(Denied):
+            self.mod.act(self.turn, self.result, 'submit_order', order_name='PO',
+                         source_hash=approved.source_hash, reason='旧页面中的采购单')
         self.assertEqual(self.po.submissions, 0)
 
 
@@ -443,8 +458,8 @@ class OnHandScopeTests(unittest.TestCase):
         for kind, name in [('Company', 'Company'), ('Item', 'CONNECTOR'), ('Warehouse', 'WH')]:
             self.f.docs[kind, name] = Doc(name=name, company='Company', is_group=0, disabled=0)
         self.f.docs['Supply Case', 'CASE'] = self.case
-        self.practice = NS(context=lambda case: None, validate_snapshot=lambda case, ctx: None,
-                           check_order=lambda case, po: None)
+        self.practice = NS(context=lambda case: None, validate_snapshot=lambda case, ctx, **kw: None,
+                           check_order=lambda case, po, **kw: None)
         self.practice.lock_case = lambda case: self.practice.context(case)
         with patch.dict(sys.modules, {'frappe': self.f, 'frappe.utils': NS(flt=float, now_datetime=datetime.now)}), \
                 patch.object(suke_ops, 'supply_practice', self.practice, create=True):
@@ -492,7 +507,7 @@ class OnHandScopeTests(unittest.TestCase):
         entry = {'dataset_id': 'TEST-DATASET', 'registered': True, 'label': '本地隔离演练',
                  'site': 'focus.local', 'version': 'v1'}
         self.practice.context = lambda case: entry
-        self.practice.validate_snapshot = lambda case, ctx: entry
+        self.practice.validate_snapshot = lambda case, ctx, **kw: entry
         return entry
 
     def test_sandbox_registration_is_hashed_and_rechecked_at_proposal_and_approval(self):
@@ -555,6 +570,25 @@ class OnHandScopeTests(unittest.TestCase):
         with self.assertRaises(Invalid):
             self.api.snapshot(self.case, scope='on_hand_only')
 
+    def test_execution_rejects_current_case_changed_after_an_ordinary_snapshot_read(self):
+        ctx = self.api.snapshot(self.case, scope='on_hand_only')
+        plan = compare(ctx)['plans'][0]
+        plan['scope'] = 'on_hand_only'
+        decision = Doc(name='DEC', supply_case='CASE', selected_plan='sales_first', snapshot_hash=digest(ctx),
+                       plan_json=json.dumps(plan), workflow_state='已批准', execution_result=None)
+        self.f.docs['Supply Decision', 'DEC'] = decision
+        current_case = deepcopy(self.case)
+        current_case.blocked_qty += 1
+        ordinary_read = self.f.get_doc
+        def read(kind, name=None, **options):
+            if kind == 'Supply Case' and options.get('for_update'):
+                return current_case
+            return ordinary_read(kind, name)
+        self.f.get_doc = read
+        with self.assertRaisesRegex(Invalid, '审批后供需已变化'):
+            self.api.execute('DEC')
+        self.assertEqual(decision.workflow_state, '已批准')
+
     def test_partially_delivered_sales_order_reserves_full_remaining_quantity(self):
         self.reserve_partial_sales()
 
@@ -583,7 +617,7 @@ class OnHandScopeTests(unittest.TestCase):
         decision.add_comment = lambda *a: None
         self.f.docs['Supply Decision', 'DEC'] = decision
         original_get_doc, created = self.f.get_doc, []
-        def get_doc(kind, name=None):
+        def get_doc(kind, name=None, **kwargs):
             if isinstance(kind, dict):
                 self.assertEqual(kind['doctype'], 'Stock Reservation Entry')
                 doc = Doc(name='SRE-1', **kind)
