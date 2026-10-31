@@ -76,3 +76,17 @@ test('live discussion sends a server scenario selector without client facts',asy
  assert.equal(h.calls[0].args.module,'control');assert.equal(h.host.find('textarea').val(),'草稿保留');
  assert.equal(h.calls[0].args.facts,undefined);
 });
+test('audit defaults to compact evidence with escaped source and real attribution',()=>{
+ const {Hub}=environment(),h=Object.create(Hub.prototype);
+ h.names={stock:'库存'};h.esc=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');h.answer=h.esc;
+ const markup=h.auditTrail({name:'TURN',events:[{id:1,module:'stock',kind:'evidence',at:'2026-10-31T05:00:00+00:00',summary:'读取成功',source_ids:['H1']}],sources:[{id:'H1',label:'补充',text:'<script>unsafe</script>',reported_by:'buyer@example.invalid',reported_at:'2026-10-31 13:00:00',source_type:'登录用户补充',source_path:'prior',version:'abc',verification:'待核实'}]});
+ assert.ok(markup.includes('buyer@example.invalid'));assert.ok(markup.includes('&lt;script&gt;'));
+ assert.ok(!markup.includes('<script>'));assert.ok(!markup.includes('<details open'));
+ assert.ok(markup.includes('核对 1 条来源'));
+});
+test('business provenance card links actual source and keeps account meaning explicit',()=>{
+ const {Hub}=environment(),h=Object.create(Hub.prototype);h.esc=v=>String(v??'').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+ const html=h.recordSource({result_excerpt:JSON.stringify({_provenance:{doctype:'Purchase Order',name:'PO-1',created_by:'creator',created_at:'2026-10-30',modified_by:'editor',modified_at:'2026-10-31',read_at:'2026-10-31 15:00',note:'账号不等于承诺人'}})});
+ assert.ok(html.includes('data-docname="PO-1"'));assert.ok(html.includes('editor'));assert.ok(html.includes('账号不等于承诺人'));
+ assert.equal(h.recordSource({result_excerpt:'{truncated',truncated:true}),'');
+});

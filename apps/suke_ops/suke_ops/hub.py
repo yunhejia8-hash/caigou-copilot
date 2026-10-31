@@ -176,7 +176,7 @@ def owned_turn(name):
 
 
 @frappe.whitelist(methods=['POST'])
-def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False):
+def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None):
     require_user()
     check_module(module, control=True)
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
@@ -189,6 +189,28 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         if module != 'control':
             frappe.throw('场景讨论仅支持总控。')
         scenario = evidence(int(scenario_id), scenario_updated in (True, 1, '1', 'true'))
+    if previous_turn:
+        prior = owned_turn(previous_turn)
+        if prior.state != 'done' or module != 'control':
+            frappe.throw('请等待原讨论结束后补充信息。')
+        scenario = json.loads(prior.result or '{}').get('verified_evidence')
+        if not scenario or not scenario.get('synthetic'):
+            frappe.throw('此入口仅用于合成场景复核。')
+        if not isinstance(human_note, str) or not human_note.strip() or len(human_note) > 1000:
+            frappe.throw('请输入1–1000字补充信息。')
+        notes = scenario.setdefault('human_sources', [])
+        if len(notes) >= 10:
+            frappe.throw('本案例已达到10条补充上限，请整理后重新建案。')
+        note = human_note.strip()
+        notes.append({'id': 'H' + str(len(notes) + 1), 'label': '人员补充（待核实）',
+                      'text': note, 'reported_by': frappe.session.user, 'reported_at': str(now_datetime()),
+                      'source_type': '登录用户补充', 'source_path': prior.name,
+                      'verification': '尚未核实，不代表供应商确认或审批通过',
+                      'version': hashlib.sha256(note.encode()).hexdigest()[:12]})
+        scenario['previous_turn'] = prior.name
+        scenario['verified_plan'] = {}
+        scenario['calculation'] = {'status': '已有人员补充；旧计算已暂停，需重新核实输入。'}
+        scenario['evidence_precedence'] = '原证据为历史基线；人员补充尚未核实，不自动覆盖原约束，不直接执行。'
     conversation = str(uuid.UUID(conversation)) if conversation else str(uuid.uuid4())
     request_id = str(uuid.UUID(request_id)) if request_id else str(uuid.uuid4())
     key = hashlib.sha256((frappe.session.user + ':' + request_id).encode()).hexdigest()
@@ -236,6 +258,10 @@ def read_record(module, doctype, name):
     doc.check_permission('read')
     result = {field: doc.get(field) for field in fields_for(doctype)}
     result['doctype'] = doctype
+    result['_provenance'] = {'doctype': doctype, 'name': doc.name, 'created_by': doc.owner,
+                             'created_at': str(doc.creation), 'modified_by': doc.modified_by,
+                             'modified_at': str(doc.modified), 'read_at': str(now_datetime()),
+                             'note': '创建/修改账号不等于业务信息承诺人；未提供者不推定。'}
     for table in ('items', 'required_items'):
         if doc.meta.has_field(table) and not cint(doc.meta.get_field(table).permlevel):
             item_fields = ['item_code', 'qty', 'stock_qty', 'rate', 'warehouse', 'schedule_date',
@@ -300,11 +326,11 @@ def run_turn(name):
         stored = json.loads(turn.result or '{}')
         if stored.get('scenario'):
             from suke_ops.live_discussion import discuss
-            def publish(rows):
-                frappe.db.set_value('Agent Turn', name, 'result', json.dumps(
-                    {'discussion': rows, 'synthetic': True, 'mode': '真实模型讨论 / 合成证据 / 不执行'}, ensure_ascii=False))
+            def publish_event(state):
+                state['mode'] = '真实模型讨论 / 合成证据 / 不执行'
+                frappe.db.set_value('Agent Turn', name, 'result', json.dumps(state, ensure_ascii=False))
                 frappe.db.commit()
-            result = discuss(stored['scenario'], turn.question, publish)
+            result = discuss(stored['scenario'], turn.question, lambda rows: None, on_event=publish_event)
             frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': result['answer'],
                                 'result': json.dumps(result, ensure_ascii=False)})
             frappe.db.commit()
@@ -315,7 +341,7 @@ def run_turn(name):
         messages = [message for row in reversed(previous) if not json.loads(row.result or '{}').get('synthetic') for message in
                     ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
 
-        def dispatch(module, tool, args):
+        def execute_tool(module, tool, args):
             if module == 'control' and tool == 'read_module_reports':
                 return {'reports': latest_reports(), 'current_boards': [module_board(key) for key in MODULE_DOCS],
                         'note': '历史汇报可能过时，业务事实须按当前面板核实。'}
@@ -361,6 +387,25 @@ def run_turn(name):
                 return {**offer, 'state': '待用户打开，尚未创建单据'}
             frappe.throw('未授权工具。', frappe.PermissionError)
 
+        events = []
+        def audit(module, kind, summary, **extra):
+            events.append({'id': len(events)+1, 'module': module, 'kind': kind,
+                           'phase': '业务查询', 'at': str(now_datetime()), 'summary': summary, **extra})
+            frappe.db.set_value('Agent Turn', name, 'result', json.dumps({'events': events, 'trace': trace, 'offers': offers}, ensure_ascii=False, default=str))
+            frappe.db.commit()
+        def dispatch(module, tool, args):
+            labels = {'ask_module': '委派部门核查', 'read_module_reports': '读取部门汇报', 'read_module_board': '核查业务看板', 'list_records': '查询单据清单', 'read_record': '核对单据详情', 'compare_supply_case': '计算缺料方案', 'offer_draft': '准备草稿入口'}
+            audit(module, 'query', labels.get(tool, tool), tool=tool, query=args)
+            try:
+                value = execute_tool(module, tool, args)
+            except Exception:
+                audit(module, 'failed', '查询失败或无权限，未取得可用依据。', tool=tool)
+                raise
+            encoded = json.dumps(value, ensure_ascii=False, default=str)
+            audit(module, 'evidence', '已取得查询结果，展开查看返回记录', tool=tool,
+                  query=args, result_excerpt=encoded[:12000], truncated=len(encoded)>12000)
+            return value
+
         specs = [runtime.schema('ask_module', '委派任务给指定业务 Agent，必要时依次询问多个模块',
                                 {'module': runtime.text_schema(MODULE_DOCS), 'question': runtime.text_schema()}, ['module', 'question'])] \
             if turn.agent_module == 'control' else module_tools(turn.agent_module)
@@ -379,13 +424,13 @@ def run_turn(name):
         if failed_modules:
             answer += '\n\n未核实模块：' + '、'.join(failed_modules) + '。可切换对应模块重试。'
         frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
-                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results}, ensure_ascii=False, default=str)})
+                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'events': events}, ensure_ascii=False, default=str)})
     except Exception as error:
         frappe.db.rollback()
         frappe.db.set_value('Agent Turn', name, {'state': 'failed',
                             'answer': ('本轮分析未完成：' + str(error) if type(error) is RuntimeError else
                                        '本轮分析未完成：请检查业务权限或问题范围后重试。') + ' 业务单据未由 Agent 保存或提交。',
-                            'result': json.dumps({'error_type': type(error).__name__, 'trace': trace}, ensure_ascii=False)})
+                            'result': json.dumps({**json.loads(frappe.db.get_value('Agent Turn', name, 'result') or '{}'), 'error_type': type(error).__name__, 'trace': trace}, ensure_ascii=False)})
     frappe.db.commit()
 
 
@@ -418,3 +463,24 @@ def open_draft(name, index):
     doc.name = None
     doc.set('__islocal', 1)
     return doc.as_dict()
+
+
+@frappe.whitelist()
+def discussion_activity(module='control'):
+    """Only the caller's recent runs; department workspaces share the same audit trail."""
+    require_user()
+    check_module(module, control=True)
+    rows = frappe.get_list('Agent Turn', filters={'owner': frappe.session.user},
+                           fields=['name', 'question', 'state', 'result', 'modified'],
+                           order_by='modified desc', limit_page_length=8)
+    activity = []
+    for row in rows:
+        data = json.loads(row.result or '{}')
+        events = [e for e in data.get('events', []) if module == 'control' or e.get('module') == module]
+        if not events and row.state not in ('queued', 'running'):
+            continue
+        ids = {sid for event in events for sid in event.get('source_ids', [])}
+        activity.append({'name': row.name, 'question': row.question, 'state': row.state,
+                         'events': events, 'sources': [r for r in data.get('sources', []) if r['id'] in ids],
+                         'discussion': data.get('discussion', []), 'synthetic': data.get('synthetic', False)})
+    return activity

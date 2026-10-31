@@ -54,6 +54,12 @@ frappe.SupplyHub = class {
                 this.send(values.question, {scenario_id: id, scenario_updated: Boolean(values.updated)});
             }, '真实模型讨论 · 合成证据 · 不执行', '开始两轮讨论');
         });
+        this.host.on('click', '[data-add-evidence]', event => {
+            if (this.busy || this.restoring) return;
+            frappe.prompt([{fieldname: 'note', fieldtype: 'Small Text', label: '补充合成信息（系统记录当前登录账号和时间；不等于审批）', reqd: 1}], values => {
+                this.send('请核实新增信息，只说明变化、影响和待确认事项。', {previous_turn: event.currentTarget.dataset.addEvidence, human_note: values.note});
+            }, '补充信息并复核 · 保留上一版', '记录并复核');
+        });
         this.host.on('click', '[data-doctype]', (event) => {
             const {doctype, docname} = event.currentTarget.dataset;
             this.onNavigate();
@@ -87,6 +93,9 @@ frappe.SupplyHub = class {
         const signals = (board ? [board] : this.data.modules).flatMap(row => (row.signals || []).map(text => `<li><a href="${this.moduleUrl(row.module)}">${this.esc(row.label)}</a> · ${this.esc(text)}</li>`));
         const content = board ? `<div class="hub-summary">${board.metrics.map(metric => `<div class="hub-metric"><span>${this.esc(metric.label)}</span><strong>${metric.value ?? '—'}<small>${this.esc(metric.unit)}</small></strong></div>`).join('')}</div>${this.renderTable(board)}${(board.sections || []).map(section => this.renderSection(section)).join('')}` : this.data.modules.map(row => `<a class="hub-module-card" href="${this.moduleUrl(row.module)}"><b>${this.esc(row.label)} Agent →</b><span>${this.esc(row.metrics[0].label)}：${row.metrics[0].value ?? '—'} ${this.esc(row.metrics[0].unit)}</span></a>`).join('');
         this.host.find('.hub-module-board').html(`<div class="hub-data-toolbar"><b>${board ? board.label + '数据看板' : '模块上报与决策'}</b><button type="button" class="hub-reload">刷新</button></div>${content}${['control', 'buying'].includes(this.module) ? '<a class="hub-module-card" href="/assets/suke_ops/scenario-demo/index.html" target="_blank" rel="noopener"><b>采购异常协同演示 →</b><span>六类合成场景 · 预设部门反馈与成本试算</span></a>' : ''}<h3>待跟进问题</h3>${signals.length ? '<ul>' + signals.join('') + '</ul>' : '<p>当前可见数据未发现规则预警。</p>'}<h3>Agent 最新汇报</h3>${reports.length ? reports.map(row => `<details><summary>${this.esc(this.names[row.module])} · ${this.esc(row.at)}</summary><div class="hub-markdown">${this.answer(row.answer)}</div></details>`).join('') : '<p>模块完成分析后，结果自动汇入总控。</p>'}${board ? `<a class="hub-module-card" href="${this.moduleUrl('control')}">前往总控研判 →</a>` : '<button type="button" data-prompt="请读取各模块最新上报和当前数据，汇总问题、影响及优先处理建议，明确需要负责人批准的事项。">汇总上报并研判</button>'}`);
+        this.host.find('.hub-module-board').append('<section class="hub-activity"><h3>本账号协同足迹</h3><p>正在读取…</p></section>');
+        this.activityMarkup = null;
+        this.refreshActivity();
         this.host.find('.hub-reload').on('click', () => this.refresh());
         this.renderBusy();
     }
@@ -169,10 +178,76 @@ frappe.SupplyHub = class {
             [['name', '订单'], [board.module === 'buying' ? 'supplier' : 'customer', board.module === 'buying' ? '供应商' : '客户'], [board.module === 'buying' ? 'schedule_date' : 'delivery_date', '交期'], [board.module === 'buying' ? 'per_received' : 'per_delivered', '完成 %'], ['status', '状态']];
         return `<div class="hub-section-label">${this.esc(board.label)}数据面板</div><h3>${stock ? '现存库存明细' : '未完成业务单据'}</h3>${!board.access ? '<p>当前账号没有读取权限。</p>' : !board.rows.length ? '<p>当前没有符合条件的数据。</p>' : `<div class="hub-table-scroll"><table><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join('')}</tr></thead><tbody>${board.rows.map(row => `<tr>${columns.map(([key]) => `<td>${key === 'name' ? this.link(board.doctype, row.name) : this.esc(row[key] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`}${stock ? '<p class="hub-table-note">现存量不等于可分配量；预计数量未区分交期，不能据此判断按时交付。请进入异常方案核对交期、冻结和预留归属。</p>' : ''}`;
     }
+    sourceCard(source) {
+        return `<div class="hub-source"><b>${this.esc(source.id)} · ${this.esc(source.label)}</b><p>${this.esc(source.text)}</p><small>来源：${this.esc(source.source_type)} / ${this.esc(source.source_path)}<br>提交账号：${this.esc(source.reported_by || '未提供（合成设定）')} · 提供时间：${this.esc(source.reported_at || '未提供')}<br>版本：${this.esc(source.version)} · ${this.esc(source.verification)}</small></div>`;
+    }
+    recordSource(event) {
+        if (!event.result_excerpt || event.truncated) return '';
+        try {
+            const result = JSON.parse(event.result_excerpt), source = result._provenance;
+            if (!source) return '';
+            return `<div class="hub-source"><b>${this.link(source.doctype,source.name,'打开原单据 ' + source.name)}</b><p>创建账号：${this.esc(source.created_by)} · ${this.esc(source.created_at)}<br>修改账号：${this.esc(source.modified_by)} · ${this.esc(source.modified_at)}<br>本次读取：${this.esc(source.read_at)}</p><small>${this.esc(source.note)}</small></div>`;
+        } catch (_) { return ''; }
+    }
+    auditTrail(turn, prefix = '') {
+        const groups = new Map();
+        for (const event of turn.events || []) {
+            const groupKey = event.module + ':' + event.phase;
+            if (!groups.has(groupKey)) groups.set(groupKey, []);
+            groups.get(groupKey).push(event);
+        }
+        if (!groups.size) return '';
+        return `<div class="hub-audit">${Array.from(groups.values()).map(events => {
+            const latest = events[events.length-1];
+            const ids = new Set(events.flatMap(event => event.source_ids || []));
+            const sources = (turn.sources || []).filter(row => ids.has(row.id));
+            const businessSources = events.map(event => this.recordSource(event)).join('');
+            const reply = latest.reply_index === undefined ? null : (turn.discussion || [])[latest.reply_index];
+            const key = prefix + turn.name + ':' + events[0].id;
+            const time = latest.at.includes('T') ? new Date(latest.at).toLocaleTimeString('zh-CN', {hour12:false}) : latest.at.slice(11,19);
+            return `<div class="hub-audit-event hub-event-${this.esc(latest.kind)}"><div class="hub-audit-meta"><b>${this.esc(this.names[latest.module] || latest.module)}</b><span>${this.esc(latest.phase || '')}${reply ? ' · 待核实' : ''}</span><time title="${this.esc(latest.at)}">${this.esc(time)}</time></div><p>${this.esc(latest.summary)}</p>
+            ${sources.length ? `<details data-audit-key="sources-${this.esc(key)}"><summary>核对 ${sources.length} 条来源</summary>${sources.map(row => this.sourceCard(row)).join('')}</details>` : ''}
+            ${businessSources ? `<details data-audit-key="records-${this.esc(key)}"><summary>查看单据来源与修改记录</summary>${businessSources}</details>` : ''}
+            <details data-audit-key="steps-${this.esc(key)}"><summary>${events.length}步操作留痕${reply ? ' · 完整反馈' : ''}</summary>${events.map(event => `<div class="hub-source"><small>${this.esc(event.at)} · ${this.esc(event.summary)}</small>${event.query?.doctype && event.query?.name ? this.link(event.query.doctype,event.query.name,'打开原单据') : ''}${event.query ? '<pre>' + this.esc(JSON.stringify(event.query,null,2)) + '</pre>' : ''}${event.result_excerpt ? '<pre>' + this.esc(event.result_excerpt) + '</pre>' + (event.truncated ? '<small>仅保留前12000字符，完整数据请查原单据。</small>' : '') : ''}</div>`).join('')}${reply ? '<div class="hub-markdown">' + this.answer(reply.answer) + '</div>' : ''}</details></div>`;
+        }).join('')}</div>`;
+    }
+    async refreshActivity() {
+        clearTimeout(this.activityTimer);
+        try {
+            const rows = await this.call('discussion_activity', {module: this.module});
+            if (!this.host[0]?.isConnected) return;
+            const area = this.host.find('.hub-activity');
+            const opened = new Set(Array.from(area[0]?.querySelectorAll('details[open]') || []).map(el => el.dataset.auditKey));
+            const markup = '<h3>本账号协同足迹</h3><p class="hub-table-note">展示实际工具调用及反馈。合成证据不是ERP查询；模型发言不是人员承诺。</p>' + (rows.length ? rows.map(row => `<details data-audit-key="activity-${this.esc(row.name)}"><summary>${this.esc(row.synthetic ? '合成场景' : '业务查询')} · ${row.state === 'running' ? '进行中' : '记录'} · ${this.esc(row.question.slice(0,50))} · ${row.events.length}条</summary>${this.auditTrail(row, 'activity-')}</details>`).join('') : '<p>暂无本账号的查询留痕。发起分析后，可在对应部门跟踪。</p>');
+            if (this.activityMarkup !== markup) {
+                area.html(markup); this.activityMarkup = markup;
+                area[0]?.querySelectorAll('details').forEach(el => {if (opened.has(el.dataset.auditKey)) el.open = true;});
+            }
+            if (this.busy || rows.some(row => ['running','queued'].includes(row.state))) this.activityTimer = setTimeout(() => {
+                if (this.host[0]?.isConnected) this.refreshActivity();
+            }, 4000);
+        } catch (_) { this.host.find('.hub-activity').html('<p>协同足迹读取失败，点击刷新可重试。</p>'); }
+    }
     renderMessages() {
         const messages = this.host.find('.hub-messages');
-        messages.html(this.turns.length ? this.turns.map(turn => `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><small>${this.esc(this.names[turn.agent_module] || '总控')} Agent</small><div class="hub-markdown">${this.answer(turn.answer || (turn.state === 'failed' ? '分析未完成，请重试。' : '正在读取业务数据并协调相关模块…'))}</div>${turn.verified_evidence?.verified_plan?.allocation ? `<div class="hub-table-note"><b>程序核算（优先于模型解释）</b><p>${this.esc(turn.verified_evidence.verified_plan.allocation)}</p><p>${this.esc(turn.verified_evidence.verified_plan.constraints)}</p><p>增量费用：${this.esc(turn.verified_evidence.calculation.expedite_incremental_cost_if_approved)}元；实际节省未验证。</p></div>` : ''}${(turn.discussion || []).map(row => `<details open><summary>${this.esc(this.names[row.module])} · ${this.esc(row.phase)} · ${row.status === 'done' ? '模型反馈 · 待核实' : '调用失败 · 未核实'}</summary><div class="hub-markdown">${this.answer(row.answer)}</div></details>`).join('')}${turn.synthetic ? '<p class="hub-table-note">真实模型讨论 / 合成证据 / 未执行业务操作</p>' : ''}${(turn.offers || []).map((offer, index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">将打开未保存的原生表单，请核对数量、仓库和必填项后保存。</p>' : ''}</article>`).join('') : `<div class="hub-empty"><h2>${this.module === 'control' ? '查看模块上报，协调下一步' : this.names[this.module] + '有哪些问题需要处理？'}</h2></div>`);
-        messages.scrollTop(messages[0].scrollHeight);
+        const node = messages[0];
+        const previousScroll = node.scrollTop || 0;
+        const follow = node.scrollHeight - previousScroll - (node.clientHeight || 0) < 100;
+        const opened = new Set(Array.from(node.querySelectorAll?.('details[open]') || []).map(el => el.dataset.auditKey));
+        const markup = this.turns.length ? this.turns.map(turn => {
+            const completed = ['done', 'failed'].includes(turn.state);
+            const replies = (turn.discussion || []).length;
+            const summary = turn.answer || (turn.state === 'failed' ? '本次分析未完成，请检查记录后重试。' : '正在核对依据，反馈将逐步显示。');
+            return `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><div class="hub-run-head"><b>${turn.synthetic ? '合成场景 · 真实协作' : this.esc(this.names[turn.agent_module] || '总控') + ' Agent'}</b><span>${completed ? '本轮结束' : '正在协同'}${replies ? ' · ' + replies + '/10项反馈' : ''}</span></div>${turn.events?.length ? this.auditTrail(turn) : (turn.discussion || []).map((row,i) => `<details data-audit-key="legacy-${this.esc(turn.name)}-${i}"><summary>${this.esc(this.names[row.module])} · ${this.esc(row.phase)} · 待核实</summary><div class="hub-markdown">${this.answer(row.answer)}</div></details>`).join('')}
+            <div class="hub-outcome"><b>${completed ? '待你处理' : '当前状态'}</b><p>${this.esc(summary.length > 220 ? summary.slice(0,220) + '…' : summary)}</p>${summary.length > 220 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(summary)}</div></details>` : ''}</div>
+            ${turn.synthetic ? '<p class="hub-table-note">模型反馈待核实；不自动采购、不释放预留。来源没有提供人时明确留空。</p>' : ''}
+            ${turn.synthetic && turn.state === 'done' ? `<button type="button" data-add-evidence="${this.esc(turn.name)}">补充信息并复核</button>` : ''}
+            ${(turn.offers || []).map((offer,index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">打开未保存草稿，仍需核对、审批。</p>' : ''}</article>`;
+        }).join('') : `<div class="hub-empty"><h2>${this.module === 'control' ? '查看模块上报，协调下一步' : this.names[this.module] + '有哪些问题需要处理？'}</h2></div>`;
+        if (this.messageMarkup === markup) return;
+        messages.html(markup); this.messageMarkup = markup;
+        node.querySelectorAll?.('details').forEach(el => {if (opened.has(el.dataset.auditKey)) el.open = true;});
+        messages.scrollTop(follow ? node.scrollHeight : previousScroll);
     }
     renderBusy() {
         this.host.find('.hub-send').prop('disabled', this.restoring || this.busy || !this.data?.model_ready).text(this.busy ? '分析中…' : '发送 ↑');
@@ -192,6 +267,7 @@ frappe.SupplyHub = class {
             const response = await this.call('start', {question, module, conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario});
             const turn = {...response, question, agent_module: module, state: 'queued'};
             this.turns.push(turn);
+            if (this.host[0]?.isConnected) this.refreshActivity();
             if (typeof prompt !== 'string' && this.host.find('textarea').val() === draft) this.host.find('textarea').val('');
             this.renderMessages();
             await this.watch(turn);
