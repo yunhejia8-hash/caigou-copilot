@@ -9,7 +9,7 @@ from frappe.utils import cint, flt, now_datetime, nowdate
 from suke_ops import agent_runtime as runtime
 
 MODULE_DOCS = {
-    'buying': ['Material Request', 'Request for Quotation', 'Supplier Quotation', 'Purchase Order', 'Supplier'],
+    'buying': ['Material Request', 'Request for Quotation', 'Supplier Quotation', 'Purchase Order', 'Supplier', 'Purchase Receipt', 'Quality Inspection'],
     'selling': ['Customer', 'Quotation', 'Sales Order', 'Delivery Note', 'Sales Invoice'],
     'stock': ['Item', 'Warehouse', 'Bin', 'Stock Reservation Entry', 'Purchase Order', 'Purchase Receipt', 'Stock Entry', 'Stock Reconciliation', 'Quality Inspection'],
     'manufacturing': ['BOM', 'Production Plan', 'Work Order', 'Job Card', 'Stock Entry'],
@@ -22,7 +22,7 @@ LABELS = {'Material Request': '采购申请', 'Request for Quotation': '询价',
           'BOM': '物料清单', 'Production Plan': '生产计划', 'Work Order': '工单', 'Job Card': '工序执行'}
 SHARED_DOCS = ['Supply Case', 'Supply Decision', 'Operations Approval']
 FIELDS = ['name', 'modified', 'docstatus', 'status', 'title', 'supplier', 'customer', 'company', 'currency',
-          'grand_total', 'schedule_date', 'delivery_date', 'transaction_date', 'posting_date', 'per_received',
+          'report_date', 'inspection_type', 'reference_type', 'reference_name', 'sample_size', 'grand_total', 'schedule_date', 'delivery_date', 'transaction_date', 'posting_date', 'per_received',
           'per_delivered', 'production_item', 'qty', 'produced_qty', 'planned_start_date', 'item_code',
           'warehouse', 'actual_qty', 'reserved_qty', 'reserved_stock', 'projected_qty', 'workflow_state']
 DRAFTS = {
@@ -90,20 +90,67 @@ def module_board(module):
                    {'label': '有效预留记录', 'value': count('Stock Reservation Entry', {'docstatus': 1, 'status': ['not in', ['Closed', 'Cancelled', 'Delivered', 'Consumed']]}), 'unit': '条'},
                    {'label': '预计缺料仓位（未分交期）', 'value': count('Bin', {'projected_qty': ['<', 0]}), 'unit': '项'}]
         rows = records('Bin', {'actual_qty': ['!=', 0]})
-    return {'module': module, 'label': runtime.MODULES[module], 'metrics': metrics, 'doctype': doctype,
+    sections, signals = board_details(module, metrics)
+    return {'sections': sections, 'signals': signals, 'module': module, 'as_of': nowdate(), 'label': runtime.MODULES[module], 'metrics': metrics, 'doctype': doctype,
             'stock_meaning': 'Bin.reserved_stock 是实际锁定量；projected_qty 是未分交期的账面预计量，不代表按时可交付。精确交期缺口用 compare_supply_case。',
             'rows': rows, 'row_limit': 12, 'access': frappe.has_permission(doctype, 'read'),
             'links': [{'doctype': dt, 'label': LABELS[dt]} for dt in MODULE_DOCS[module]
                       if dt != 'Bin' and frappe.has_permission(dt, 'read')]}
 
 
+def board_details(module, metrics):
+    definitions = {
+        'buying': [('Material Request', '采购申请'), ('Purchase Receipt', '到货记录'), ('Quality Inspection', '到货质检')],
+        'selling': [('Delivery Note', '发货记录')],
+        'stock': [('Stock Reservation Entry', '库存预留'), ('Quality Inspection', '质量检验'), ('Purchase Receipt', '收货记录')],
+        'manufacturing': [('Job Card', '工序执行')],
+    }
+    sections = []
+    for doctype, label in definitions[module]:
+        columns = [('name', '单号'), ('status', '状态')]
+        if doctype == 'Quality Inspection':
+            columns += [('item_code', '物料'), ('report_date', '检验日期'), ('inspection_type', '类型'), ('sample_size', '样本数量'), ('reference_name', '关联单据')]
+        elif doctype == 'Stock Reservation Entry':
+            columns += [('item_code', '物料'), ('warehouse', '仓库'), ('reserved_qty', '预留数量')]
+        else:
+            columns += [('posting_date', '日期')]
+        sections.append({'doctype': doctype, 'label': label, 'columns': columns,
+                         'access': frappe.has_permission(doctype, 'read'), 'rows': records(doctype)})
+    signals = []
+    for metric in metrics:
+        if metric['value'] and metric['label'] in ['已逾期订单', '待交付订单', '预计缺料仓位（未分交期）', '待启动工单', '待收货订单']:
+            signals.append(f"{metric['label']}：{metric['value']}{metric['unit']}，需本模块跟进。")
+    if module in ('stock', 'buying'):
+        rejected = count('Quality Inspection', {'docstatus': ['<', 2], 'status': 'Rejected'})
+        if rejected:
+            signals.append(f'质检不合格：{rejected}单，需核对可用库存及供方处理。')
+    return sections, signals
+
+
+def latest_reports():
+    # 同一账号的模块分析自动成为总控可读汇报，保留源会话和时间。
+    result = []
+    for module in MODULE_DOCS:
+        rows = frappe.get_list('Agent Turn', filters={'owner': frappe.session.user, 'agent_module': module, 'state': 'done'},
+                              fields=['name', 'answer', 'modified'], order_by='modified desc', limit_page_length=1)
+        if rows:
+            result.append({'module': module, 'turn': rows[0].name, 'answer': rows[0].answer, 'at': str(rows[0].modified)})
+    return result
+
+
 @frappe.whitelist()
 def dashboard():
     require_user()
-    return {'modules': [module_board(module) for module in MODULE_DOCS], 'at': str(now_datetime()),
+    return {'reports': latest_reports(), 'modules': [module_board(module) for module in MODULE_DOCS], 'at': str(now_datetime()),
             'model_ready': runtime.configured(), 'cases': records('Supply Case', limit=6),
             'approvals': records('Operations Approval', {'workflow_state': ['in', ['待审批', '已驳回']]}, 6),
             'decisions': records('Supply Decision', {'workflow_state': ['in', ['待审批', '已驳回']]}, 6)}
+
+
+@frappe.whitelist()
+def chat_status():
+    require_user()
+    return {'model_ready': runtime.configured()}
 
 
 def install():
@@ -239,20 +286,40 @@ def run_turn(name):
     frappe.set_user(turn.owner)
     frappe.db.set_value('Agent Turn', name, 'state', 'running')
     frappe.db.commit()
-    trace, offers, budget = [], [], [18]
+    trace, offers, budget, tool_budget = [], [], [18], [48]
+    module_results = []
     try:
         require_user()
         previous = frappe.get_all('Agent Turn', filters={'owner': turn.owner, 'conversation': turn.conversation,
-                                 'state': 'done', 'creation': ['<', turn.creation]}, fields=['question', 'answer'],
+                                 'state': 'done', 'agent_module': turn.agent_module, 'creation': ['<', turn.creation]}, fields=['question', 'answer'],
                                   order_by='creation desc', limit_page_length=4)
         messages = [message for row in reversed(previous) for message in
                     ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
 
         def dispatch(module, tool, args):
+            if module == 'control' and tool == 'read_module_reports':
+                return {'reports': latest_reports(), 'current_boards': [module_board(key) for key in MODULE_DOCS],
+                        'note': '历史汇报可能过时，业务事实须按当前面板核实。'}
             if module == 'control' and tool == 'ask_module':
                 target = args['module']
-                answer = runtime.respond(target, args['question'], [], module_tools(target), dispatch, trace, budget=budget)
-                return {'module': target, 'answer': answer}
+                # 同模块不同问法也复用已完成摘要，防止总控反复委派耗尽预算。
+                previous_result = next((row for row in module_results if row['module'] == target), None)
+                if previous_result:
+                    return previous_result
+                # 子模块最多4次模型请求，为总控保留1次汇总机会。
+                child_budget = [max(0, min(4, budget[0] - 1))]
+                initial = child_budget[0]
+                try:
+                    answer = runtime.respond(target, args['question'], [], module_tools(target), dispatch, trace,
+                                             budget=child_budget, tool_budget=tool_budget)
+                    result = {'module': target, 'status': 'done', 'answer': answer}
+                except RuntimeError as error:
+                    result = {'module': target, 'status': 'failed', 'answer': str(error)}
+                    trace.append({'agent': target, 'tool': 'module_failed', 'error': str(error)})
+                finally:
+                    budget[0] -= initial - child_budget[0]
+                module_results.append(result)
+                return result
             if module not in MODULE_DOCS:
                 frappe.throw('未知模块。', frappe.PermissionError)
             if tool == 'read_module_board':
@@ -278,9 +345,22 @@ def run_turn(name):
         specs = [runtime.schema('ask_module', '委派任务给指定业务 Agent，必要时依次询问多个模块',
                                 {'module': runtime.text_schema(MODULE_DOCS), 'question': runtime.text_schema()}, ['module', 'question'])] \
             if turn.agent_module == 'control' else module_tools(turn.agent_module)
-        answer = runtime.respond(turn.agent_module, turn.question, messages, specs, dispatch, trace, budget=budget)
+        if turn.agent_module == 'control':
+            specs.append(runtime.schema('read_module_reports', '读取各模块已上报分析与最新风险面板；研判上报时先调用', {}))
+        try:
+            answer = runtime.respond(turn.agent_module, turn.question, messages, specs, dispatch, trace,
+                                     budget=budget, tool_budget=tool_budget)
+        except RuntimeError:
+            if not any(row['status'] == 'done' for row in module_results):
+                raise
+            answer = '汇总未完成，已取得的模块结果如下：\n\n' + '\n\n'.join(
+                runtime.MODULES[row['module']] + '：' + (row['answer'] if row['status'] == 'done' else '本轮未核实，请切换该模块重试。')
+                for row in module_results)
+        failed_modules = sorted({runtime.MODULES[row['module']] for row in module_results if row['status'] == 'failed'})
+        if failed_modules:
+            answer += '\n\n未核实模块：' + '、'.join(failed_modules) + '。可切换对应模块重试。'
         frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
-                            'result': json.dumps({'trace': trace, 'offers': offers}, ensure_ascii=False, default=str)})
+                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results}, ensure_ascii=False, default=str)})
     except Exception as error:
         frappe.db.rollback()
         frappe.db.set_value('Agent Turn', name, {'state': 'failed',

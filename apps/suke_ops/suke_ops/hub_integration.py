@@ -105,6 +105,68 @@ def run():
         assert {row['agent'] for row in result['trace']} == {'control', *hub.MODULE_DOCS}
         assert len(result['trace']) == 8
         checks.append('总控实际委派四模块，四个独立Agent均调用各自业务工具（模型响应模拟）')
+        repeated = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': str(uuid.uuid4()),
+                                   'agent_module': 'control', 'question': '重复委派预算验证', 'state': 'queued'}).insert(ignore_permissions=True)
+        names.append(repeated.name)
+        frappe.db.commit()
+        buying_requests = []
+        def repeated_provider(system, messages, tools):
+            if '你是采购 Agent' in system:
+                buying_requests.append(1)
+            output = provider(system, messages, tools)
+            if tools[0]['name'] == 'ask_module' and output['stop_reason'] == 'tool_use':
+                output['content'].append({'type': 'tool_use', 'id': 'buying-again', 'name': 'ask_module',
+                                          'input': {'module': 'buying', 'question': '换个问法再查采购'}})
+            return output
+        with patch('suke_ops.agent_runtime.request_model', repeated_provider):
+            hub.run_turn(repeated.name)
+        assert hub.poll(repeated.name)['state'] == 'done'
+        assert len(buying_requests) == 2, buying_requests
+        checks.append('总控换问法重复委派同一模块时复用摘要，不额外消耗子模块模型预算')
+        partial = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': str(uuid.uuid4()),
+                                  'agent_module': 'control', 'question': '部分模块失败时保留结果', 'state': 'queued'}).insert(ignore_permissions=True)
+        names.append(partial.name)
+        frappe.db.commit()
+        def partial_provider(system, messages, tools):
+            if '你是销售 Agent' in system:
+                raise RuntimeError('合成测试：销售服务暂不可用')
+            if tools[0]['name'] == 'ask_module' and len(messages) > 1:
+                raise RuntimeError('合成测试：汇总失败')
+            return provider(system, messages, tools)
+        with patch('suke_ops.agent_runtime.request_model', partial_provider):
+            hub.run_turn(partial.name)
+        partial_result = hub.poll(partial.name)
+        assert partial_result['state'] == 'done', partial_result
+        assert '销售：本轮未核实' in partial_result['answer']
+        assert '采购：已根据实际工具' in partial_result['answer']
+        assert any(row['tool'] == 'module_failed' for row in partial_result['trace'])
+        checks.append('子模块失败不阻断其他模块，汇总失败保留已完成结论并标注未核实模块')
+        report_turn = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': str(uuid.uuid4()),
+                                     'agent_module': 'stock', 'question': '库存巡检', 'answer': '合成验收：库存问题需要总控协调', 'state': 'done'}).insert(ignore_permissions=True)
+        names.append(report_turn.name)
+        frappe.db.commit()
+        assert any(row['turn'] == report_turn.name for row in hub.latest_reports())
+        control_report = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': str(uuid.uuid4()),
+                                        'agent_module': 'control', 'question': '研判模块上报', 'state': 'queued'}).insert(ignore_permissions=True)
+        names.append(control_report.name)
+        frappe.db.commit()
+        def report_provider(system, messages, tools):
+            if len(messages) == 1:
+                return {'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': 'reports', 'name': 'read_module_reports', 'input': {}}]}
+            payload = json.loads(messages[-1]['content'][0]['content'])
+            assert any(row['turn'] == report_turn.name for row in payload['reports'])
+            assert len(payload['current_boards']) == 4
+            return {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '已读取库存上报并核对四模块面板，建议负责人协调。'}]}
+        with patch('suke_ops.agent_runtime.request_model', report_provider):
+            hub.run_turn(control_report.name)
+        assert hub.poll(control_report.name)['state'] == 'done'
+        checks.append('总控通过真实工具读取模块上报及四模块当前面板，生成协调建议')
+        board = hub.module_board('stock')
+        assert any(section['doctype'] == 'Quality Inspection' for section in board['sections'])
+        frappe.set_user(user)
+        assert not any(row['turn'] == report_turn.name for row in hub.latest_reports())
+        frappe.set_user('Administrator')
+        checks.append('模块完成分析自动进入总控汇报，用户隔离生效，库存看板提供质检数据')
         conversation = str(uuid.uuid4())
         for index in range(51):
             history_turn = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation,

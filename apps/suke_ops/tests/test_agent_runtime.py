@@ -59,6 +59,40 @@ class AgentRuntimeTests(unittest.TestCase):
             respond('buying', 'test', [], self.spec, lambda *args: {}, [], budget=[0],
                     provider=lambda *args: self.fail('预算用尽时不得调用模型'))
 
+    def test_seven_legal_calls_finish_with_matching_results(self):
+        calls = [{'type': 'tool_use', 'id': str(i), 'name': 'read', 'input': {'name': str(i)}} for i in range(7)]
+        executed = []
+        def provider(system, messages, tools):
+            if len(messages) == 1:
+                return {'stop_reason': 'tool_use', 'content': calls}
+            self.assertEqual([row['tool_use_id'] for row in messages[-1]['content']], [str(i) for i in range(7)])
+            return {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '完成'}]}
+        answer = respond('buying', '摘要', [], [schema('read', '读取', {'name': text_schema()}, ['name'])],
+                         lambda *args: executed.append(args) or {}, [], provider=provider)
+        self.assertEqual(answer, '完成')
+        self.assertEqual(len(executed), 7)
+
+    def test_repeated_queries_reuse_result(self):
+        self.run_agent([self.output(), self.output(), {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '完成'}]}])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_oversized_batch_executes_nothing(self):
+        calls = [{**self.output()['content'][0], 'id': str(i)} for i in range(25)]
+        with self.assertRaises(RuntimeError):
+            self.run_agent([{'stop_reason': 'tool_use', 'content': calls}])
+        self.assertEqual(self.calls, [])
+
+    def test_invalid_call_at_end_rejects_whole_batch(self):
+        calls = [self.output()['content'][0], {**self.output('submit_purchase')['content'][0], 'id': 'call-2'}]
+        with self.assertRaises(RuntimeError):
+            self.run_agent([{'stop_reason': 'tool_use', 'content': calls}])
+        self.assertEqual(self.calls, [])
+
+    def test_shared_tool_budget_cannot_be_exceeded(self):
+        with self.assertRaises(RuntimeError):
+            respond('buying', '查订单', [], self.spec, lambda *args: self.fail('不得执行'), [],
+                    tool_budget=[0], provider=lambda *args: self.output())
+
 
 if __name__ == '__main__':
     unittest.main()

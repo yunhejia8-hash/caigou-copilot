@@ -58,3 +58,14 @@ test('opening dialog refuses unsaved or dirty forms before loading resources', a
     handlers['Supply Case'].refresh(frm);await buttons['采购对话']();
     assert.equal(loads,0);assert.match(messages[0],/先保存/);
 });
+test('upstream module constructor and purchase order context stay isolated',()=>{
+ const {Hub}=environment();Hub.prototype.refresh=Hub.prototype.restore=()=>{};
+ const stock=new Hub({main:{}},'chat','stock'),data=new Hub({main:{}},'data','buying');
+ const po=new Hub({main:{}},{orderName:'PO-001'}),other=new Hub({main:{}},{orderName:'PO-002'});
+ assert.equal(stock.module,'stock');assert.equal(data.view,'data');assert.equal(po.module,'buying');
+ assert.notEqual(po.key,other.key);assert.match(po.contextPrefix(),/PO-001/);assert.match(po.contextPrefix(),/未确认/);
+});
+test('quick prompts retain typed draft and receive context',async()=>{
+ const {Hub}=environment(),h=sender(Hub,{text:'未写完的问题'});await h.send('核对到货');
+ assert.ok(h.calls[0].args.question.endsWith('核对到货'));assert.equal(h.host.find('textarea').val(),'未写完的问题');
+});

@@ -12,6 +12,36 @@
 
 .hub-message>div.hub-markdown{white-space:normal;overflow-x:auto}.hub-markdown h1,.hub-markdown h2,.hub-markdown h3{font-size:16px;line-height:1.6;margin:15px 0 10px}.hub-markdown p{margin:8px 0}.hub-markdown table{border-collapse:collapse;white-space:nowrap;font-size:11px}.hub-markdown th,.hub-markdown td{padding:8px;border:1px solid #e2e9e4}.hub-markdown ul,.hub-markdown ol{padding-left:22px}.hub-markdown pre{white-space:pre-wrap}
 
+/* 对话页固定输入区，只有消息区域滚动。 */
+.hub-chat-page{height:calc(100dvh - 130px);min-height:400px;max-width:1080px;padding:0 12px 12px;display:flex;flex-direction:column}
+.hub-chat-page .hub-tabs{flex:none;margin:0;min-height:48px}
+.hub-chat-page .hub-chat{flex:1;min-height:0;display:flex;flex-direction:column;border:0;border-radius:0}
+.hub-chat-page .hub-chat-head{flex:none;padding:12px 16px;border:0}
+.hub-chat-page .hub-messages{flex:1;min-height:0;max-height:none;padding:16px 24px;overscroll-behavior:contain}
+.hub-chat-page .hub-prompts{flex:none;flex-wrap:wrap;overflow:visible;margin:8px 16px}
+.hub-chat-page .hub-composer{flex:none;margin:0 16px 8px;padding:12px 16px}
+.hub-chat-page .hub-composer textarea{resize:none;min-height:54px}
+.hub-chat-page .hub-model-note:empty{display:none}
+.hub-chat-page .hub-empty{padding-top:12vh}
+.hub-chat-page .hub-empty h2{font-size:22px}
+.hub-chat-page .hub-state{font-size:11px}
+.hub-data-toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;font-weight:600}
+.hub-data-panels{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.hub-data-page .hub-detail h3:not(:first-child){margin-top:24px}
+.hub-data-page .hub-detail .hub-section-label{margin-top:20px}
+@media(max-width:800px){.hub-chat-page{height:calc(100dvh - 115px);padding:0 0 8px;min-height:320px}.hub-chat-page .hub-tabs button{padding:10px}.hub-chat-page .hub-messages{padding:12px}.hub-data-panels{grid-template-columns:1fr}.hub-chat-page .hub-composer{margin:0 8px 8px}.hub-chat-page .hub-prompts{margin:8px}}
+
+.hub-chat-page{max-width:none;height:calc(100dvh - 100px)}
+.hub-workspace{display:grid;grid-template-columns:minmax(380px,1.2fr) minmax(330px,1fr);gap:24px;flex:1;min-height:0}
+.hub-module-board{overflow:auto;min-height:0;border-left:1px solid var(--hub-line);padding:16px;font-size:13px}
+.hub-module-board h3{font-size:15px;margin:24px 0 12px}.hub-module-board p{color:#7a877e}
+.hub-module-board table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}.hub-module-board td,.hub-module-board th{padding:10px;border-bottom:1px solid var(--hub-line);text-align:left}
+.hub-module-board details{padding:12px 0;border-bottom:1px solid var(--hub-line)}
+.hub-module-card{display:flex;justify-content:space-between;gap:12px;border:1px solid var(--hub-line);padding:14px;margin:10px 0;border-radius:10px;color:var(--hub-ink)}
+.hub-tabs a{padding:13px 20px;color:#728177;white-space:nowrap;border-bottom:3px solid transparent;text-decoration:none}.hub-tabs a[aria-current=page]{border-color:var(--hub-green);color:var(--hub-green);font-weight:700}
+a.hub-metric{display:block;text-decoration:none}.hub-module-board .hub-summary{grid-template-columns:repeat(2,minmax(120px,1fr))}.hub-module-board .hub-metric{padding:10px}.hub-module-board .hub-metric strong{font-size:23px}
+@media(max-width:900px){.hub-workspace{display:flex;flex-direction:column;overflow:auto}.hub-chat-page .hub-chat{flex:none;height:65dvh}.hub-module-board{overflow:visible;border-left:0;border-top:1px solid var(--hub-line)}.hub-tabs a{padding:12px}}
+
 /* 异常单内嵌对话沿用同一 Agent，只隐藏主页导航与重复面板。 */
 .supply-hub.hub-case-chat { padding: 0; }
 .hub-case-chat .hub-heading, .hub-case-chat .hub-tabs,
@@ -20,3 +50,10 @@
 .hub-case-chat .hub-layout { display: block; }
 .hub-case-chat .hub-chat { min-height: 0; }
 .hub-case-chat .hub-messages { height: min(44vh, 420px); min-height: 200px; }
+
+/* 表单弹窗兼容独立模块工作台，不显示重复数据看板。 */
+.supply-hub.hub-case-chat { height: auto; min-height: 0; }
+.hub-case-chat .hub-module-board { display: none; }
+.hub-case-chat .hub-workspace { display: block; }
+.hub-case-chat .hub-chat { height: auto; }
+.hub-case-chat .hub-messages { flex: none; height: min(44vh, 420px); min-height: 200px; }
