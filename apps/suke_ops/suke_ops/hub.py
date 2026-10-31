@@ -9,29 +9,8 @@ from frappe.utils import cint, flt, now_datetime, nowdate
 
 from suke_ops import agent_runtime as runtime
 from suke_ops import demand
+from suke_ops.catalog import MODULE_DOCS, STAGE_DOCS, AGENT_DOCS, LABELS, SHARED_DOCS, stage_scope, stage_definition, metric_specs
 
-MODULE_DOCS = {
-    'buying': ['Material Request', 'Request for Quotation', 'Supplier Quotation', 'Purchase Order', 'Supplier', 'Purchase Receipt', 'Quality Inspection'],
-    'selling': ['Customer', 'Quotation', 'Sales Order', 'Delivery Note', 'Sales Invoice'],
-    'stock': ['Item', 'Warehouse', 'Bin', 'Stock Reservation Entry', 'Purchase Order', 'Purchase Receipt', 'Stock Entry', 'Stock Reconciliation', 'Quality Inspection'],
-    'manufacturing': ['BOM', 'Production Plan', 'Work Order', 'Job Card', 'Stock Entry'],
-}
-STAGE_DOCS = {
-    'buying-demand': ['Material Request', 'Item', 'Bin'],
-    'buying-inquiry': ['Request for Quotation', 'Supplier Quotation', 'Supplier', 'Material Request'],
-    'buying-comparison': ['Supplier Quotation', 'Request for Quotation', 'Supplier', 'Item'],
-    'buying-approval': ['Operations Approval', 'Purchase Order', 'Supplier Quotation'],
-    'buying-order': ['Purchase Order', 'Material Request', 'Supplier Quotation', 'Supplier'],
-    'buying-receipt': ['Purchase Receipt', 'Purchase Order', 'Quality Inspection', 'Bin', 'Warehouse'],
-}
-AGENT_DOCS = {**MODULE_DOCS, **STAGE_DOCS}
-LABELS = {'Material Request': '采购申请', 'Request for Quotation': '询价', 'Supplier Quotation': '供应商报价',
-          'Purchase Order': '采购订单', 'Supplier': '供应商', 'Customer': '客户', 'Quotation': '销售报价',
-          'Sales Order': '销售订单', 'Delivery Note': '发货', 'Sales Invoice': '销售账单', 'Item': '物料',
-          'Warehouse': '仓库', 'Bin': '库存明细', 'Stock Reservation Entry': '库存预留', 'Purchase Receipt': '收货',
-          'Stock Entry': '出入库与调拨', 'Stock Reconciliation': '盘点', 'Quality Inspection': '质检',
-          'BOM': '物料清单', 'Production Plan': '生产计划', 'Work Order': '工单', 'Job Card': '工序执行'}
-SHARED_DOCS = ['Supply Case', 'Supply Decision', 'Operations Approval']
 FIELDS = ['name', 'modified', 'docstatus', 'status', 'title', 'supplier', 'customer', 'company', 'currency',
           'material_request_type', 'per_ordered', 'valid_till', 'source_type', 'source_name', 'reason',
           'report_date', 'inspection_type', 'reference_type', 'reference_name', 'sample_size', 'grand_total', 'schedule_date', 'delivery_date', 'transaction_date', 'posting_date', 'per_received',
@@ -76,6 +55,9 @@ def fields_for(doctype):
 def records(doctype, filters=None, limit=12):
     if not frappe.has_permission(doctype, 'read'):
         return []
+    if doctype in SHARED_DOCS:
+        from suke_ops.business_search import shared_records
+        return shared_records(doctype, filters, fields_for(doctype))[:limit]
     return frappe.get_list(doctype, fields=fields_for(doctype), filters=filters or {},
                            order_by='modified desc', limit_page_length=limit)
 
@@ -83,87 +65,51 @@ def records(doctype, filters=None, limit=12):
 def count(doctype, filters):
     if not frappe.has_permission(doctype, 'read'):
         return None
+    if doctype in SHARED_DOCS:
+        from suke_ops.business_search import shared_records
+        return len(shared_records(doctype, filters))
     rows = frappe.get_list(doctype, fields=[{'COUNT': 'name', 'as': 'total'}], filters=filters)
     return cint(rows[0].total) if rows else 0
+
+
+def board_metrics(module):
+    return [{'label': row['label'], 'value': count(row['doctype'], row['filters']), 'unit': row['unit'],
+             'search_entry': row['id']} for row in metric_specs(module)]
 
 
 def module_board(module):
     check_module(module)
     if module in STAGE_DOCS:
         return stage_board(module)
-    if module in ('buying', 'selling'):
-        purchase = module == 'buying'
-        doctype = 'Purchase Order' if purchase else 'Sales Order'
-        progress, due = ('per_received', 'schedule_date') if purchase else ('per_delivered', 'delivery_date')
-        pending = {'docstatus': 1, 'status': ['not in', ['Closed', 'Cancelled']], progress: ['<', 100]}
-        late = {**pending, due: ['<', nowdate()]}
-        metrics = [{'label': '待收货订单' if purchase else '待交付订单', 'value': count(doctype, pending), 'unit': '单'},
-                   {'label': '已逾期订单', 'value': count(doctype, late), 'unit': '单'},
-                   {'label': '订单草稿', 'value': count(doctype, {'docstatus': 0}), 'unit': '单'}]
-        rows = records(doctype, pending)
-    elif module == 'manufacturing':
-        doctype = 'Work Order'
-        pending = {'docstatus': 1, 'status': ['not in', ['Completed', 'Stopped', 'Closed', 'Cancelled']]}
-        metrics = [{'label': '未完成工单', 'value': count(doctype, pending), 'unit': '单'},
-                   {'label': '生产中', 'value': count(doctype, {'docstatus': 1, 'status': 'In Process'}), 'unit': '单'},
-                   {'label': '待启动工单', 'value': count(doctype, {'docstatus': 1, 'status': 'Not Started'}), 'unit': '单'}]
-        rows = records(doctype, pending)
-    else:
-        doctype = 'Bin'
-        metrics = [{'label': '有现存量的物料仓位', 'value': count('Bin', {'actual_qty': ['>', 0]}), 'unit': '项'},
-                   {'label': '有效预留记录', 'value': count('Stock Reservation Entry', {'docstatus': 1, 'status': ['not in', ['Closed', 'Cancelled', 'Delivered', 'Consumed']]}), 'unit': '条'},
-                   {'label': '预计缺料仓位（未分交期）', 'value': count('Bin', {'projected_qty': ['<', 0]}), 'unit': '项'}]
-        rows = records('Bin', {'actual_qty': ['!=', 0]})
+    specs = metric_specs(module)
+    doctype = specs[0]['doctype']
+    filters = specs[0]['filters'] if module != 'stock' else {'actual_qty': ['!=', 0]}
+    metrics = board_metrics(module)
+    rows = records(doctype, filters)
     sections, signals = board_details(module, metrics)
-    return {'sections': sections, 'signals': signals, 'module': module, 'as_of': nowdate(), 'label': runtime.MODULES[module], 'metrics': metrics, 'doctype': doctype,
+    return {'sections': sections, 'signals': signals, 'module': module, 'as_of': nowdate(), 'label': runtime.MODULES[module], 'metrics': metrics, 'doctype': doctype, 'search_entry': 'query:' + module + ':rows',
             'stock_meaning': 'Bin.reserved_stock 是实际锁定量；projected_qty 是未分交期的账面预计量，不代表按时可交付。精确交期缺口用 compare_supply_case。',
             'rows': rows, 'row_limit': 12, 'access': frappe.has_permission(doctype, 'read'),
             'links': [{'doctype': dt, 'label': LABELS[dt]} for dt in MODULE_DOCS[module]
                       if dt != 'Bin' and frappe.has_permission(dt, 'read')]}
-
-
-def stage_scope(module, doctype):
-    if module in STAGE_DOCS:
-        if doctype == 'Material Request':
-            return {'material_request_type': 'Purchase'}
-        if doctype == 'Operations Approval':
-            return {'source_type': 'Purchase Order'}
-    return {}
-
-
 def stage_board(module):
     """进度直接引用业务状态和完成比例；六环节计数不是同一批单据的漏斗。"""
-    definitions = {
-        'buying-demand': ('Material Request', [('schedule_date', '需求日期'), ('per_ordered', '已订购 %')], [
-            ('待提交', {'docstatus': 0}), ('待采购', {'docstatus': 1, 'per_ordered': ['<', 100], 'status': ['not in', ['Stopped', 'Cancelled']]}),
-            ('已订购', {'docstatus': 1, 'per_ordered': ['>=', 100]})]),
-        'buying-inquiry': ('Request for Quotation', [('transaction_date', '询价日期'), ('schedule_date', '需求日期')], [
-            ('询价草稿', {'docstatus': 0}), ('已提交询价', {'docstatus': 1}), ('已取消询价', {'docstatus': 2})]),
-        'buying-comparison': ('Supplier Quotation', [('supplier', '供应商'), ('currency', '币种'), ('grand_total', '报价总额'), ('valid_till', '有效至')], [
-            ('报价草稿', {'docstatus': 0}), ('已提交报价', {'docstatus': 1}), ('已过有效期', {'docstatus': 1, 'valid_till': ['<', nowdate()]})]),
-        'buying-approval': ('Operations Approval', [('source_name', '采购单'), ('reason', '申请说明')], [
-            ('待审批', {'workflow_state': '待审批'}), ('已驳回', {'workflow_state': '已驳回'}), ('已批准', {'workflow_state': '已批准'})]),
-        'buying-order': ('Purchase Order', [('supplier', '供应商'), ('schedule_date', '订单交期'), ('per_received', '已收货 %')], [
-            ('订单草稿', {'docstatus': 0}), ('待收货', {'docstatus': 1, 'per_received': ['<', 100], 'status': ['not in', ['Closed', 'Cancelled']]}),
-            ('已收齐', {'docstatus': 1, 'per_received': ['>=', 100]}),
-            ('已逾期订单', {'docstatus': 1, 'per_received': ['<', 100], 'status': ['not in', ['Closed', 'Cancelled']], 'schedule_date': ['<', nowdate()]})]),
-        'buying-receipt': ('Purchase Receipt', [('supplier', '供应商'), ('posting_date', '收货日期'), ('grand_total', '金额'), ('currency', '币种')], [
-            ('待提交收货', {'docstatus': 0}), ('已提交收货', {'docstatus': 1, 'is_return': 0}), ('退货单', {'docstatus': 1, 'is_return': 1})]),
-    }
-    doctype, extra_columns, progress = definitions[module]
+    doctype, extra_columns, _ = stage_definition(module)
     scope = stage_scope(module, doctype)
-    metrics = [{'label': label, 'value': count(doctype, {**scope, **filters}), 'unit': '单'} for label, filters in progress]
+    metrics = board_metrics(module)
     sections = []
     if module == 'buying-receipt':
         sections, _ = board_details('stock', [])
         sections = [row for row in sections if row['doctype'] == 'Quality Inspection']
         sections.insert(0, {'doctype': 'Purchase Order', 'label': '待到货订单', 'access': frappe.has_permission('Purchase Order', 'read'),
+                           'search_entry': 'query:buying:0',
                            'columns': [('name', '订单'), ('supplier', '供应商'), ('schedule_date', '交期'), ('per_received', '已收货 %')],
                            'rows': records('Purchase Order', {'docstatus': 1, 'per_received': ['<', 100], 'status': ['not in', ['Closed', 'Cancelled']]})})
-        metrics.append({'label': '质检不合格', 'value': count('Quality Inspection', {'docstatus': ['<', 2], 'inspection_type': 'Incoming', 'status': 'Rejected'}), 'unit': '单'})
         sections[-1]['rows'] = records('Quality Inspection', {'inspection_type': 'Incoming', 'docstatus': ['<', 2]})
+        sections[-1]['search_entry'] = 'query:buying-receipt:quality'
     elif module == 'buying-inquiry':
         sections.append({'doctype': 'Supplier Quotation', 'label': '已收到的报价（需按询价单核对）',
+                         'search_entry': 'query:buying-inquiry:quotations',
                          'access': frappe.has_permission('Supplier Quotation', 'read'),
                          'columns': [('name', '报价单'), ('supplier', '供应商'), ('status', '状态'), ('valid_till', '有效至')],
                          'rows': records('Supplier Quotation', {'docstatus': ['<', 2]})})
@@ -191,10 +137,11 @@ def stage_board(module):
             else:
                 columns += [('schedule_date', '需求日期')]
         sections.insert(0, {'doctype': doctype, 'label': '供应商回复进度' if module == 'buying-inquiry' else '物料明细（最近单据，最多60行）',
+                           'search_entry': 'query:' + module + ':rows',
                            'columns': columns, 'access': frappe.has_permission(doctype, 'read'), 'rows': lines[:60]})
     return {'module': module, 'label': runtime.MODULES[module], 'as_of': nowdate(), 'doctype': doctype,
             'metrics': metrics, 'sections': sections, 'signals': signals, 'access': frappe.has_permission(doctype, 'read'),
-            'rows': rows, 'row_limit': 12,
+            'rows': rows, 'row_limit': 12, 'search_entry': 'query:' + module + ':rows',
             'columns': [('name', '单号'), ('workflow_state' if module == 'buying-approval' else 'status', '进度 / 状态'), *extra_columns],
             'note': '按当前账号权限统计；列表显示最近12笔。进度以各单据状态为准，环节间数量不能直接当作转化率。'}
 
