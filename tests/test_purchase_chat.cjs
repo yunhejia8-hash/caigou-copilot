@@ -99,3 +99,21 @@ test('history restores evidence in one request instead of polling each old turn'
  await h.restore();
  assert.deepEqual(calls,['history']);assert.equal(h.turns[0].events.length,1);assert.equal(h.restoring,false);
 });
+test('supplier source separates simulated speaker from actual uploader and escapes both', () => {
+ const {Hub}=environment(), h=Object.create(Hub.prototype);
+ h.esc=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+ const html=h.sourceCard({id:'E11',actor:'供应商（演示角色）',reported_at:'2026-11-02T10:18:00+08:00',channel:'群聊',text:'只有120件 <script>bad</script>',related_records:['PO-1286'],status:'未发出',version:'new',supersedes:'E05',ingestion:{recorded_by:'<buyer>',recorded_at:'2026-10-31 20:00:00'}});
+ assert.match(html,/供应商（演示角色）/); assert.match(html,/场景时间/); assert.match(html,/实际录入账号：&lt;buyer&gt;/);
+ assert.match(html,/不是供应商真实上传/); assert.match(html,/原消息保留/); assert.ok(!html.includes('<script>'));
+ assert.equal(h.plainSummary('## 当前结论\n**待确认**：见[原始消息](https://example.invalid)。'),'当前结论\n待确认：见原始消息。');
+});
+test('completed discussion collapses audit but running discussion shows incremental evidence', () => {
+ const {Hub}=environment(), h=Object.create(Hub.prototype); let html='';
+ const node={scrollTop:0,scrollHeight:300,clientHeight:300,querySelectorAll:()=>[]};
+ h.host={find:()=>({0:node,html:v=>{html=v;},scrollTop:()=>{}})};
+ h.esc=String;h.names={control:'总控'};h.scenarioBrief=h.scenarioActions=()=>'';h.auditTrail=()=>'<div>逐步查询与反馈</div>';
+ h.turns=[{name:'T',question:'核对供给',state:'running',answer:'',events:[{}]}];
+ h.renderMessages(); assert.match(html,/逐步查询与反馈/); assert.ok(!html.includes('data-audit-key="process-'));
+ h.turns[0].state='done';h.turns[0].answer='当前自由量200件；确定量缺口360件。';h.renderMessages();
+ assert.match(html,/<details data-audit-key="process-T">/);assert.ok(html.indexOf('当前自由量')<html.indexOf('逐步查询与反馈'));assert.ok(!html.includes('<details open'));
+});

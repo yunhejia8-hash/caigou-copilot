@@ -11,8 +11,11 @@ from suke_ops import agent_runtime as runtime
 
 
 def evidence(index, updated=False):
-    if type(index) is not int or not 0 <= index < 6 or type(updated) is not bool:
+    if type(index) is not int or not 0 <= index < 7 or type(updated) is not bool:
         raise ValueError('场景参数无效。')
+    if index == 6:
+        from suke_ops.trace_scenario import evidence as trace_evidence
+        return trace_evidence(updated)
     rows = json.loads(Path(__file__).with_name('scenario_facts.json').read_text())
     row = rows[index]
     if updated and index != 0:
@@ -33,6 +36,8 @@ def evidence(index, updated=False):
 
 
 def source_records(snapshot):
+    if snapshot.get('rich_sources'):
+        return snapshot['rich_sources'] + snapshot.get('human_sources', [])
     records = []
     for label, value in snapshot['facts']:
         records.append({'id': label.split(' · ')[0], 'label': label, 'text': value,
@@ -47,6 +52,42 @@ def short_reply(text, limit=140):
     plain = re.sub(r'[#*`>|]', '', text)
     plain = re.sub(r'\s+', ' ', plain).strip()
     return plain if len(plain) <= limit else plain[:limit] + '…'
+
+
+
+def _model_payload(snapshot, selected_sources, discussion, single_source=False):
+    """Keep one copy of source text in model context, without changing audit data.
+
+    Rich cases store the same source three ways for UI/backward compatibility:
+    facts, rich_sources and the tool's sources. Only the model projection is
+    compacted. Unmatched facts and all business constraints remain available.
+    """
+    if single_source:
+        relevant_keys = ('scenario_key', 'synthetic', 'snapshot_version', 'as_of',
+                         'evidence_precedence', 'boundary')
+        model_evidence = {key: snapshot[key] for key in relevant_keys if key in snapshot}
+    else:
+        model_evidence = {key: value for key, value in snapshot.items()
+                          if key not in ('facts', 'rich_sources', 'human_sources')}
+        covered = {(row.get('label'), row.get('text')) for row in selected_sources}
+        unmatched = [fact for fact in snapshot.get('facts', []) if tuple(fact) not in covered]
+        if unmatched:
+            model_evidence['facts'] = unmatched
+
+    model_sources = []
+    for source in selected_sources:
+        row = dict(source)
+        # The rich source's original channel/time already contains these values.
+        # Preserve different timestamps (e.g. actual receipt/ingestion time).
+        if 'channel' in row and row.get('source_type') == row['channel']:
+            row.pop('source_type', None)
+        if 'at' in row and row.get('reported_at') == row['at']:
+            row.pop('reported_at', None)
+        model_sources.append(row)
+    # Full replies are retained; summary and duration are derived UI fields.
+    model_discussion = [{key: value for key, value in row.items()
+                         if key not in ('summary', 'duration_ms')} for row in discussion]
+    return {'evidence': model_evidence, 'sources': model_sources, 'discussion': model_discussion}
 
 
 def discuss(snapshot, question, publish, provider=None, on_event=None):
@@ -98,10 +139,8 @@ def discuss(snapshot, question, publish, provider=None, on_event=None):
                 queue_event('query', ('程序预读证据 ' if preload else 'Agent查询证据 ') +
                             (args.get('evidence_id') or '清单、约束及前序部门反馈'),
                             tool=tool, query=args, origin=origin)
-                result = {'evidence': snapshot, 'sources': selected, 'discussion': prior_feedback}
-                if args.get('evidence_id'):
-                    result['evidence'] = {'facts': [[row['label'], row['text']] for row in selected],
-                                          'boundary': snapshot['boundary']}
+                result = _model_payload(snapshot, selected, prior_feedback,
+                                        single_source=bool(args.get('evidence_id')))
                 read_ids.update(row['id'] for row in selected)
                 queue_event('evidence', '读取到 ' + str(len(selected)) + ' 条证据；可展开核对原文',
                             source_ids=[row['id'] for row in selected], tool=tool, origin=origin,
@@ -163,7 +202,9 @@ def discuss(snapshot, question, publish, provider=None, on_event=None):
         final = run_phase(executor, ('control',), '处置建议', task + ' 汇总两轮反馈，列出可选方案、数量依据、增量费用、待确认条件、责任人与审批事项。明确失败部门。没有基线不能宣称节省。')[0]
     failed = any(row['status'] == 'failed' for row in transcript)
     answer = '模型讨论已结束，所有部门发言与建议仍需核实，不代表事实已确认。\n' + final['answer']
-    if snapshot.get('verified_plan') and not snapshot.get('human_sources'):
+    if snapshot.get('deterministic_conclusion') and not snapshot.get('human_sources'):
+        answer = snapshot['deterministic_conclusion']
+    elif snapshot.get('verified_plan') and not snapshot.get('human_sources'):
         answer = ('【程序核算结论；模型发言仅供复核】\n'
                   '若备用采购获批且150件于11月3日09:00可用，220+150=370件，可在10:00用料截止前完整满足销售300件，余70件。这不是成品交付保证。\n'
                   '生产原08:00开工仍无法满足。原厂200件于14:00可用已确认，70+200=270；生产改期至11月4日获批后可分配240件，余30。\n'

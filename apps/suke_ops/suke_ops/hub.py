@@ -277,7 +277,7 @@ def owned_turn(name):
 
 
 @frappe.whitelist(methods=['POST'])
-def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None):
+def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, scenario_update=None):
     require_user()
     check_module(module, control=True)
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
@@ -289,6 +289,10 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         from suke_ops.live_discussion import evidence
         if module != 'control':
             frappe.throw('场景讨论仅支持总控。')
+        if previous_turn or scenario_update:
+            frappe.throw('新建场景与更新原讨论不能同时选择。')
+        if int(scenario_id) == 6 and scenario_updated in (True, 1, '1', 'true'):
+            frappe.throw('请先完成初始讨论，再加载10:18新消息，以保留版本关联。')
         scenario = evidence(int(scenario_id), scenario_updated in (True, 1, '1', 'true'))
     if previous_turn:
         prior = owned_turn(previous_turn)
@@ -297,21 +301,33 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         scenario = json.loads(prior.result or '{}').get('verified_evidence')
         if not scenario or not scenario.get('synthetic'):
             frappe.throw('此入口仅用于合成场景复核。')
-        if not isinstance(human_note, str) or not human_note.strip() or len(human_note) > 1000:
+        if scenario_update:
+            from suke_ops.trace_scenario import apply_update
+            try:
+                scenario = apply_update(scenario, scenario_update, prior.name, frappe.session.user, str(now_datetime()))
+            except ValueError as exc:
+                frappe.throw(str(exc))
+        elif not isinstance(human_note, str) or not human_note.strip() or len(human_note) > 1000:
             frappe.throw('请输入1–1000字补充信息。')
-        notes = scenario.setdefault('human_sources', [])
-        if len(notes) >= 10:
-            frappe.throw('本案例已达到10条补充上限，请整理后重新建案。')
-        note = human_note.strip()
-        notes.append({'id': 'H' + str(len(notes) + 1), 'label': '人员补充（待核实）',
+        else:
+            notes = scenario.setdefault('human_sources', [])
+            if len(notes) >= 10:
+                frappe.throw('本案例已达到10条补充上限，请整理后重新建案。')
+            note = human_note.strip()
+            notes.append({'id': 'H' + str(len(notes) + 1), 'label': '人员补充（待核实）',
                       'text': note, 'reported_by': frappe.session.user, 'reported_at': str(now_datetime()),
                       'source_type': '登录用户补充', 'source_path': prior.name,
                       'verification': '尚未核实，不代表供应商确认或审批通过',
                       'version': hashlib.sha256(note.encode()).hexdigest()[:12]})
-        scenario['previous_turn'] = prior.name
-        scenario['verified_plan'] = {}
-        scenario['calculation'] = {'status': '已有人员补充；旧计算已暂停，需重新核实输入。'}
-        scenario['evidence_precedence'] = '原证据为历史基线；人员补充尚未核实，不自动覆盖原约束，不直接执行。'
+            scenario['previous_turn'] = prior.name
+            scenario['verified_plan'] = {}
+            scenario.pop('deterministic_conclusion', None)
+            scenario.pop('plan', None)
+            scenario.pop('change', None)
+            scenario['calculation'] = {'status': '已有人员补充；旧计算已暂停，需重新核实输入。'}
+            scenario['evidence_precedence'] = '原证据为历史基线；人员补充尚未核实，不自动覆盖原约束，不直接执行。'
+    elif scenario_update:
+        frappe.throw('请从原讨论加载变更，以保留版本关联。')
     conversation = str(uuid.UUID(conversation)) if conversation else str(uuid.uuid4())
     request_id = str(uuid.UUID(request_id)) if request_id else str(uuid.uuid4())
     key = hashlib.sha256((frappe.session.user + ':' + request_id).encode()).hexdigest()
@@ -332,7 +348,15 @@ def start(question, module='control', conversation=None, request_id=None, scenar
                          'result': json.dumps({'scenario': scenario}, ensure_ascii=False) if scenario else None}).insert(ignore_permissions=True)
     frappe.enqueue('suke_ops.hub.run_turn', queue='long', timeout=900, enqueue_after_commit=True,
                    job_id='agent-' + doc.name, name=doc.name)
-    return {'name': doc.name, 'conversation': conversation}
+    return {'name': doc.name, 'conversation': conversation, 'synthetic': bool(scenario),
+            **({'verified_evidence': scenario} if scenario else {})}
+
+
+@frappe.whitelist()
+def scenario_preview():
+    require_user()
+    from suke_ops.trace_scenario import evidence
+    return evidence(False)
 
 
 @frappe.whitelist()

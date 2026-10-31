@@ -38,6 +38,7 @@ frappe.SupplyHub = class {
             this.conversation = crypto.randomUUID();
             sessionStorage.setItem(this.key, this.conversation);
             this.turns = [];
+            this.tracePreview = null;
             this.renderMessages();
         });
         this.host.find('form').on('submit', (event) => { event.preventDefault(); this.send(); });
@@ -46,6 +47,23 @@ frappe.SupplyHub = class {
         });
         this.host.on('click', '[data-prompt]', (event) => {
             this.send(event.currentTarget.dataset.prompt);
+        });
+        this.host.on('click', '[data-trace-demo]', async () => {
+            if (this.busy || this.restoring) return;
+            this.tracePreview = await this.call('scenario_preview');
+            this.renderMessages();
+            const area = this.host.find('.hub-messages');
+            area.scrollTop(area[0].scrollHeight);
+            this.renderBusy();
+        });
+        this.host.on('click', '[data-run-trace]', () => {
+            if (this.busy || this.restoring || !this.data?.model_ready) return;
+            this.tracePreview = null;
+            this.send('核查PO-1286供应延期：从原话和单据快照确认可用量、两张工单影响及待落实条件。不要重复计算销售与工单需求。', {scenario_id: 6});
+        });
+        this.host.on('click', '[data-scenario-update]', event => {
+            this.send('供应商提前批从200改为120，请追查旧来源、受影响的候选方案与工单，只汇报变化和需要谁确认。',
+                {previous_turn: event.currentTarget.dataset.scenarioUpdate, scenario_update: 'supplier_120'});
         });
         this.host.on('click', '[data-live-discussion]', () => {
             if (this.busy || this.restoring || !this.data?.model_ready) return;
@@ -176,7 +194,7 @@ frappe.SupplyHub = class {
             }[this.module];
             const labels = this.orderName ? ['到货跟踪', '延期处置', '费用与收益依据'] : this.caseName ? ['核对缺料', '比较方案', '确认到货条件'] : this.module === 'control' ? ['待跟进订单', '跨模块摘要'] : this.module === 'buying' ? ['采购延期风险', '准备采购草稿'] : [this.names[this.module] + '待办'];
             this.host.find('.hub-prompts').html(prompts.map((prompt, index) => `<button type="button" data-prompt="${this.esc(prompt)}">${labels[index]}</button>`).join(''));
-            if (this.module === 'control') this.host.find('.hub-prompts').append('<button type="button" data-live-discussion>真实多 Agent 场景讨论</button>');
+            if (this.module === 'control') this.host.find('.hub-prompts').append('<button type="button" data-trace-demo>200→120 供应变更</button><button type="button" data-live-discussion>其他场景讨论</button>');
             this.renderMessages();
             this.renderBusy();
             this.renderBoard();
@@ -201,7 +219,29 @@ frappe.SupplyHub = class {
         return `<div class="hub-section-label">${this.esc(board.label)}数据面板</div><h3>${stock ? '现存库存明细' : '未完成业务单据'}</h3>${!board.access ? '<p>当前账号没有读取权限。</p>' : !board.rows.length ? '<p>当前没有符合条件的数据。</p>' : `<div class="hub-table-scroll"><table><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join('')}</tr></thead><tbody>${board.rows.map(row => `<tr>${columns.map(([key]) => `<td>${key === 'name' ? this.link(board.doctype, row.name) : this.esc(row[key] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`}${stock ? '<p class="hub-table-note">现存量不等于可分配量；预计数量未区分交期，不能据此判断按时交付。请进入异常方案核对交期、冻结和预留归属。</p>' : ''}`;
     }
     sourceCard(source) {
+        if (source.actor) {
+            const ingestion = source.ingestion;
+            return `<article class="hub-message-source"><header><b>${this.esc(source.actor)}</b><time>${this.esc(source.reported_at?.slice(5,16).replace('T',' '))} · 场景时间</time></header><small>${this.esc(source.id)} · ${this.esc(source.channel)} · ${this.esc((source.related_records || []).join(' / '))}</small><blockquote>${this.esc(source.text)}</blockquote><span class="hub-proof-badge" data-status="pending">${this.esc(source.status)}</span>${source.supersedes ? `<p>更新 ${this.esc(source.supersedes)} 的提前批数量，原消息保留。</p>` : ''}<footer>演示角色，非已核验员工 · 版本 ${this.esc(source.version)}${ingestion ? '<br>实际录入账号：' + this.esc(ingestion.recorded_by) + ' · ' + this.esc(ingestion.recorded_at) + '<br>登录用户加载演示消息，不是供应商真实上传。' : ''}</footer></article>`;
+        }
         return `<div class="hub-source"><b>${this.esc(source.id)} · ${this.esc(source.label)}</b><p>${this.esc(source.text)}</p><small>来源：${this.esc(source.source_type)} / ${this.esc(source.source_path)}<br>提交账号：${this.esc(source.reported_by || '未提供（合成设定）')} · 提供时间：${this.esc(source.reported_at || '未提供')}<br>版本：${this.esc(source.version)} · ${this.esc(source.verification)}</small></div>`;
+    }
+    plainSummary(value, limit=220) {
+        const plain = String(value || '').replace(/!?(\[([^\]]+)\])\([^)]*\)/g, '$2').replace(/^[\s]*#{1,6}\s*/gm, '').replace(/[*`>|]/g, '').replace(/\n{3,}/g, '\n\n').trim();
+        return plain.length > limit ? plain.slice(0,limit).trim() + '…' : plain;
+    }
+    scenarioBrief(snapshot, key) {
+        if (snapshot?.scenario_key !== 'connector-1286') return '';
+        const c = snapshot.calculation || {}, change = snapshot.change, sources = snapshot.rich_sources || [];
+        const plan = snapshot.plan;
+        const metrics = [['自由库存', c.free_stock], ['A＋B需求', c.gross_demand], ['确定量缺口', c.free_quantity_gap]];
+        return `<section class="hub-case-brief"><div class="hub-section-heading"><h3>PO-1286 · 连接器延期</h3><span class="hub-proof-badge">合成案例 ${this.esc(snapshot.snapshot_version)}</span></div><p>同一连接器，两张工单争料。预留与待检尚未放行，销售订单与对应工单只计一次。</p>${typeof c.free_stock === 'number' ? `<div class="hub-case-metrics">${metrics.map(([label,value]) => `<div><span>${this.esc(label)}</span><strong>${this.esc(value)}<small> 件</small></strong></div>`).join('')}</div>` : `<p>${this.esc(c.status)}</p>`}<small>人物、消息、单据均为演示设定；当前未接入外部企业聊天。</small></section>
+        ${change ? `<section class="hub-change-card"><header class="hub-section-heading"><h4>10:18 新消息改变了候选方案</h4><span class="hub-proof-badge" data-status="pending">待条件落实</span></header><strong>提前批 ${this.esc(change.from_quantity)} → ${this.esc(change.to_quantity)} 件</strong><p>${this.esc(change.impact)}</p><details data-audit-key="impact-${this.esc(key)}"><summary>为什么差 ${this.esc(c.conditional_quantity_gap)} 件？追查原话与方案</summary><p>旧候选：200 自由＋160 申请调整＋200 可能提前＝560<br>新候选：200＋160＋120＝480；需求 560，差 80。若优先给 A 240，B 仅有候选 240，未满 320。</p><p>${this.esc(change.affected_plan)} → ${this.esc(change.updated_plan)} · ${this.esc(change.affected_records.join(' / '))}</p>${sources.filter(row => [change.old_source_id, change.new_source_id].includes(row.id)).map(row => this.sourceCard(row)).join('')}<p>${this.esc(change.unchanged_constraints)}</p><small>实际加载账号：${this.esc(change.recorded_by || '未录入')} · ${this.esc(change.recorded_at || '预览')}</small></details></section>` : ''}
+        <div class="hub-evidence-feed"><details data-audit-key="originals-${this.esc(key)}"><summary>原始消息与单据快照 · ${sources.length} 条演示证据</summary>${sources.slice().sort((a,b) => String(a.at).localeCompare(String(b.at))).map(row => this.sourceCard(row)).join('')}</details></div>
+        ${plan ? `<details class="hub-plan-conditions" data-audit-key="conditions-${this.esc(key)}"><summary>候选方案与 ${plan.conditions.length} 项未落实条件</summary><p>${this.esc(plan.id)} · ${this.esc(plan.status)}</p><p>候选数量 ${this.esc(c.conditional_supply)} 件；条件缺口 ${this.esc(c.conditional_quantity_gap)} 件。未确认提前批计入确定可用量：0 件。</p><ul>${plan.conditions.map(row => `<li><b>${this.esc(row.label)} · ${this.esc(row.status)}</b><br>${this.esc(row.requirement)}<small>${this.esc(row.owner)} · ${this.esc(row.source_ids.join(' / '))}</small></li>`).join('')}</ul></details>` : ''}`;
+    }
+    scenarioActions(snapshot, key) {
+        if (!snapshot?.plan?.tasks) return '';
+        return `<details class="hub-action-list" data-audit-key="actions-${this.esc(key)}"><summary>待办建议 · ${snapshot.plan.tasks.length} 项，尚未派发</summary><ol>${snapshot.plan.tasks.map(row => `<li>${this.esc(row.action)}<small>${this.esc(row.owner)} · ${this.esc(row.status)} · ${this.esc((row.suggested_due_at || row.expected_response_at).slice(5,16).replace('T',' '))}<br>${this.esc(row.time_basis)} · 依据 ${this.esc(row.source_ids.join(' / '))}</small></li>`).join('')}</ol></details>`;
     }
     recordSource(event) {
         if (!event.result_excerpt || event.truncated) return '';
@@ -257,17 +297,22 @@ frappe.SupplyHub = class {
         const previousScroll = node.scrollTop || 0;
         const follow = node.scrollHeight - previousScroll - (node.clientHeight || 0) < 100;
         const opened = new Set(Array.from(node.querySelectorAll?.('details[open]') || []).map(el => el.dataset.auditKey));
-        const markup = this.turns.length ? this.turns.map(turn => {
+        let markup = this.turns.length ? this.turns.map(turn => {
             const completed = ['done', 'failed'].includes(turn.state);
             const replies = (turn.discussion || []).length;
             const summary = turn.answer || (turn.state === 'failed' ? '本次分析未完成，请检查记录后重试。' : '正在核对依据，反馈将逐步显示。');
             const timing = turn.timing ? ` · ${(turn.timing.total_ms / 1000).toFixed(1)}秒 · ${turn.timing.model_calls}次模型请求` : '';
-            return `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><div class="hub-run-head"><b>${turn.synthetic ? '合成场景 · 真实协作' : this.esc(this.names[turn.agent_module] || '总控') + ' Agent'}</b><span>${completed ? '本轮结束' : '正在协同'}${replies ? ' · ' + replies + '/10项反馈' : ''}</span></div>${turn.events?.length ? this.auditTrail(turn) : (turn.discussion || []).map((row,i) => `<details data-audit-key="legacy-${this.esc(turn.name)}-${i}"><summary>${this.esc(this.names[row.module])} · ${this.esc(row.phase)} · 待核实</summary><div class="hub-markdown">${this.answer(row.answer)}</div></details>`).join('')}
-            <div class="hub-outcome"><b>${completed ? '待你处理' : '当前状态'}</b><small>${this.esc(timing)}</small><p>${this.esc(summary.length > 220 ? summary.slice(0,220) + '…' : summary)}</p>${summary.length > 220 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(summary)}</div></details>` : ''}</div>
+            const snapshot = turn.verified_evidence;
+            const audit = turn.events?.length ? this.auditTrail(turn) : (turn.discussion || []).map((row,i) => `<details data-audit-key="legacy-${this.esc(turn.name)}-${i}"><summary>${this.esc(this.names[row.module])} · ${this.esc(row.phase)} · 待核实</summary><div class="hub-markdown">${this.answer(row.answer)}</div></details>`).join('');
+            return `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><div class="hub-run-head"><b>${turn.synthetic ? '合成场景 · 真实协作' : this.esc(this.names[turn.agent_module] || '总控') + ' Agent'}</b><span>${completed ? '本轮结束' : '正在协同'}${replies ? ' · ' + replies + '/10项反馈' : ''}</span></div>${this.scenarioBrief(snapshot,turn.name)}
+            <div class="hub-outcome"><b>${completed ? '当前结论与下一步' : '正在核查'}</b><small>${this.esc(timing)}</small><p>${this.esc(this.plainSummary(summary))}</p>${summary.length > 220 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(summary)}</div></details>` : ''}</div>
+            ${completed && audit ? `<details data-audit-key="process-${this.esc(turn.name)}"><summary>查看部门协作过程 · ${turn.events?.length || replies} 条留痕</summary>${audit}</details>` : audit}${this.scenarioActions(snapshot,turn.name)}
             ${turn.synthetic ? '<p class="hub-table-note">模型反馈待核实；不自动采购、不释放预留。来源没有提供人时明确留空。</p>' : ''}
+            ${snapshot?.scenario_key === 'connector-1286' && !snapshot.updated && !snapshot.human_sources?.length && turn.state === 'done' ? `<button type="button" data-scenario-update="${this.esc(turn.name)}">加载10:18演示新消息：200 → 120</button>` : ''}
             ${turn.synthetic && turn.state === 'done' ? `<button type="button" data-add-evidence="${this.esc(turn.name)}">补充信息并复核</button>` : ''}
             ${(turn.offers || []).map((offer,index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">打开未保存草稿，仍需核对、审批。</p>' : ''}</article>`;
         }).join('') : `<div class="hub-empty"><h2>${this.module === 'control' ? '查看模块上报，协调下一步' : this.names[this.module] + '有哪些问题需要处理？'}</h2></div>`;
+        if (this.tracePreview) markup += `<article class="hub-message hub-assistant">${this.scenarioBrief(this.tracePreview,'preview')}<button type="button" class="hub-new" data-run-trace>开始四部门核查</button><p class="hub-table-note">读取以上演示证据调用真实模型；核查后可加载新消息，查看方案如何变化。</p></article>`;
         if (this.messageMarkup === markup) return;
         messages.html(markup); this.messageMarkup = markup;
         node.querySelectorAll?.('details').forEach(el => {if (opened.has(el.dataset.auditKey)) el.open = true;});
@@ -276,7 +321,8 @@ frappe.SupplyHub = class {
     renderBusy() {
         this.host.find('.hub-send').prop('disabled', this.restoring || this.busy || !this.data?.model_ready).text(this.busy ? '分析中…' : '发送 ↑');
         this.host.find('.hub-new').prop('disabled', this.restoring || this.busy);
-        this.host.find('[data-prompt], [data-live-discussion]').prop('disabled', this.restoring || this.busy || !this.data?.model_ready);
+        this.host.find('[data-prompt], [data-live-discussion], [data-run-trace], [data-scenario-update], [data-add-evidence]').prop('disabled', this.restoring || this.busy || !this.data?.model_ready);
+        this.host.find('[data-trace-demo]').prop('disabled', this.restoring || this.busy);
     }
     async send(prompt, scenario = {}) {
         const draft = this.host.find('textarea').val();
