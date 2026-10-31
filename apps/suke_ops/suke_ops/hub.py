@@ -176,13 +176,19 @@ def owned_turn(name):
 
 
 @frappe.whitelist(methods=['POST'])
-def start(question, module='control', conversation=None, request_id=None):
+def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False):
     require_user()
     check_module(module, control=True)
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
         frappe.throw('请输入 1–2000 字的问题。')
     if not runtime.configured():
         frappe.throw('尚未配置模型服务；面板和手动功能仍可使用。')
+    scenario = None
+    if scenario_id is not None:
+        from suke_ops.live_discussion import evidence
+        if module != 'control':
+            frappe.throw('场景讨论仅支持总控。')
+        scenario = evidence(int(scenario_id), scenario_updated in (True, 1, '1', 'true'))
     conversation = str(uuid.UUID(conversation)) if conversation else str(uuid.uuid4())
     request_id = str(uuid.UUID(request_id)) if request_id else str(uuid.uuid4())
     key = hashlib.sha256((frappe.session.user + ':' + request_id).encode()).hexdigest()
@@ -199,7 +205,8 @@ def start(question, module='control', conversation=None, request_id=None):
             frappe.throw('上一条分析尚未完成，请稍候。')
         frappe.db.set_value('Agent Turn', row.name, {'state': 'failed', 'answer': '分析超时，请重新发送。'})
     doc = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation, 'request_key': key,
-                         'agent_module': module, 'question': question.strip(), 'state': 'queued'}).insert(ignore_permissions=True)
+                         'agent_module': module, 'question': question.strip(), 'state': 'queued',
+                         'result': json.dumps({'scenario': scenario}, ensure_ascii=False) if scenario else None}).insert(ignore_permissions=True)
     frappe.enqueue('suke_ops.hub.run_turn', queue='long', timeout=900, enqueue_after_commit=True,
                    job_id='agent-' + doc.name, name=doc.name)
     return {'name': doc.name, 'conversation': conversation}
@@ -209,7 +216,7 @@ def start(question, module='control', conversation=None, request_id=None):
 def poll(name):
     doc = owned_turn(name)
     return {'name': doc.name, 'state': doc.state, 'answer': doc.answer,
-            **(json.loads(doc.result or '{}') if doc.state == 'done' else {})}
+            **(json.loads(doc.result or '{}') if doc.state in ('done', 'running', 'failed') else {})}
 
 
 @frappe.whitelist()
@@ -290,10 +297,22 @@ def run_turn(name):
     module_results = []
     try:
         require_user()
+        stored = json.loads(turn.result or '{}')
+        if stored.get('scenario'):
+            from suke_ops.live_discussion import discuss
+            def publish(rows):
+                frappe.db.set_value('Agent Turn', name, 'result', json.dumps(
+                    {'discussion': rows, 'synthetic': True, 'mode': '真实模型讨论 / 合成证据 / 不执行'}, ensure_ascii=False))
+                frappe.db.commit()
+            result = discuss(stored['scenario'], turn.question, publish)
+            frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': result['answer'],
+                                'result': json.dumps(result, ensure_ascii=False)})
+            frappe.db.commit()
+            return
         previous = frappe.get_all('Agent Turn', filters={'owner': turn.owner, 'conversation': turn.conversation,
-                                 'state': 'done', 'agent_module': turn.agent_module, 'creation': ['<', turn.creation]}, fields=['question', 'answer'],
+                                 'state': 'done', 'agent_module': turn.agent_module, 'creation': ['<', turn.creation]}, fields=['question', 'answer', 'result'],
                                   order_by='creation desc', limit_page_length=4)
-        messages = [message for row in reversed(previous) for message in
+        messages = [message for row in reversed(previous) if not json.loads(row.result or '{}').get('synthetic') for message in
                     ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
 
         def dispatch(module, tool, args):

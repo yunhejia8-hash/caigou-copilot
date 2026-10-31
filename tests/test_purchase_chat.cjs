@@ -69,3 +69,10 @@ test('quick prompts retain typed draft and receive context',async()=>{
  const {Hub}=environment(),h=sender(Hub,{text:'未写完的问题'});await h.send('核对到货');
  assert.ok(h.calls[0].args.question.endsWith('核对到货'));assert.equal(h.host.find('textarea').val(),'未写完的问题');
 });
+test('live discussion sends a server scenario selector without client facts',async()=>{
+ const {Hub}=environment(),h=sender(Hub,{caseName:'',text:'草稿保留'});
+ await h.send('核对冲突',{scenario_id:0,scenario_updated:true});
+ assert.equal(h.calls[0].args.scenario_id,0);assert.equal(h.calls[0].args.scenario_updated,true);
+ assert.equal(h.calls[0].args.module,'control');assert.equal(h.host.find('textarea').val(),'草稿保留');
+ assert.equal(h.calls[0].args.facts,undefined);
+});

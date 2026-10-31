@@ -42,6 +42,18 @@ frappe.SupplyHub = class {
         this.host.on('click', '[data-prompt]', (event) => {
             this.send(event.currentTarget.dataset.prompt);
         });
+        this.host.on('click', '[data-live-discussion]', () => {
+            if (this.busy || this.restoring || !this.data?.model_ready) return;
+            frappe.prompt([
+                {fieldname: 'scenario', fieldtype: 'Select', label: '合成场景', options: ['0 延期争料', '1 替代料未批准', '2 客户批次限制', '3 短收与质检冻结', '4 减单超采', '5 重复需求'], default: '0 延期争料', reqd: 1},
+                {fieldname: 'updated', fieldtype: 'Check', label: '首例加入已确认提前批与备用供方报价', default: 0},
+                {fieldname: 'question', fieldtype: 'Small Text', label: '讨论目标（只发送合成场景问题）', default: '请各部门核实缺口、相互复核，再由总控提出方案、费用依据和待审批事项。', reqd: 1}
+            ], values => {
+                const id = Number(values.scenario.split(' ')[0]);
+                if (values.updated && id !== 0) return frappe.msgprint('只有首例支持补充证据。');
+                this.send(values.question, {scenario_id: id, scenario_updated: Boolean(values.updated)});
+            }, '真实模型讨论 · 合成证据 · 不执行', '开始两轮讨论');
+        });
         this.host.on('click', '[data-doctype]', (event) => {
             const {doctype, docname} = event.currentTarget.dataset;
             this.onNavigate();
@@ -135,6 +147,7 @@ frappe.SupplyHub = class {
             }[this.module];
             const labels = this.orderName ? ['到货跟踪', '延期处置', '费用与收益依据'] : this.caseName ? ['核对缺料', '比较方案', '确认到货条件'] : this.module === 'control' ? ['待跟进订单', '跨模块摘要'] : this.module === 'buying' ? ['采购延期风险', '准备采购草稿'] : [this.names[this.module] + '待办'];
             this.host.find('.hub-prompts').html(prompts.map((prompt, index) => `<button type="button" data-prompt="${this.esc(prompt)}">${labels[index]}</button>`).join(''));
+            if (this.module === 'control') this.host.find('.hub-prompts').append('<button type="button" data-live-discussion>真实多 Agent 场景讨论</button>');
             this.renderMessages();
             this.renderBusy();
             this.renderBoard();
@@ -158,15 +171,15 @@ frappe.SupplyHub = class {
     }
     renderMessages() {
         const messages = this.host.find('.hub-messages');
-        messages.html(this.turns.length ? this.turns.map(turn => `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><small>${this.esc(this.names[turn.agent_module] || '总控')} Agent</small><div class="hub-markdown">${this.answer(turn.answer || (turn.state === 'failed' ? '分析未完成，请重试。' : '正在读取业务数据并协调相关模块…'))}</div>${(turn.offers || []).map((offer, index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">将打开未保存的原生表单，请核对数量、仓库和必填项后保存。</p>' : ''}</article>`).join('') : `<div class="hub-empty"><h2>${this.module === 'control' ? '查看模块上报，协调下一步' : this.names[this.module] + '有哪些问题需要处理？'}</h2></div>`);
+        messages.html(this.turns.length ? this.turns.map(turn => `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><small>${this.esc(this.names[turn.agent_module] || '总控')} Agent</small><div class="hub-markdown">${this.answer(turn.answer || (turn.state === 'failed' ? '分析未完成，请重试。' : '正在读取业务数据并协调相关模块…'))}</div>${turn.verified_evidence?.verified_plan?.allocation ? `<div class="hub-table-note"><b>程序核算（优先于模型解释）</b><p>${this.esc(turn.verified_evidence.verified_plan.allocation)}</p><p>${this.esc(turn.verified_evidence.verified_plan.constraints)}</p><p>增量费用：${this.esc(turn.verified_evidence.calculation.expedite_incremental_cost_if_approved)}元；实际节省未验证。</p></div>` : ''}${(turn.discussion || []).map(row => `<details open><summary>${this.esc(this.names[row.module])} · ${this.esc(row.phase)} · ${row.status === 'done' ? '已反馈' : '未核实'}</summary><div class="hub-markdown">${this.answer(row.answer)}</div></details>`).join('')}${turn.synthetic ? '<p class="hub-table-note">真实模型讨论 / 合成证据 / 未执行业务操作</p>' : ''}${(turn.offers || []).map((offer, index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">将打开未保存的原生表单，请核对数量、仓库和必填项后保存。</p>' : ''}</article>`).join('') : `<div class="hub-empty"><h2>${this.module === 'control' ? '查看模块上报，协调下一步' : this.names[this.module] + '有哪些问题需要处理？'}</h2></div>`);
         messages.scrollTop(messages[0].scrollHeight);
     }
     renderBusy() {
         this.host.find('.hub-send').prop('disabled', this.restoring || this.busy || !this.data?.model_ready).text(this.busy ? '分析中…' : '发送 ↑');
         this.host.find('.hub-new').prop('disabled', this.restoring || this.busy);
-        this.host.find('[data-prompt]').prop('disabled', this.restoring || this.busy || !this.data?.model_ready);
+        this.host.find('[data-prompt], [data-live-discussion]').prop('disabled', this.restoring || this.busy || !this.data?.model_ready);
     }
-    async send(prompt) {
+    async send(prompt, scenario = {}) {
         const draft = this.host.find('textarea').val();
         const input = (typeof prompt === 'string' ? prompt : draft).trim();
         const question = this.contextPrefix() + input;
@@ -176,7 +189,7 @@ frappe.SupplyHub = class {
         this.busy = true;
         this.renderBusy();
         try {
-            const response = await this.call('start', {question, module, conversation: this.conversation, request_id: crypto.randomUUID()});
+            const response = await this.call('start', {question, module, conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario});
             const turn = {...response, question, agent_module: module, state: 'queued'};
             this.turns.push(turn);
             if (typeof prompt !== 'string' && this.host.find('textarea').val() === draft) this.host.find('textarea').val('');
@@ -190,6 +203,7 @@ frappe.SupplyHub = class {
             while (Date.now() < deadline) {
                 const result = await this.call('poll', {name: turn.name});
                 Object.assign(turn, result);
+                this.renderMessages();
                 if (['done', 'failed'].includes(turn.state)) break;
                 await new Promise(resolve => setTimeout(resolve, 2200));
             }

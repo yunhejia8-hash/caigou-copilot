@@ -40,7 +40,7 @@ def request_model(system, messages, tools):
         payload['thinking'] = {'type': 'disabled'}
     request = Request(base + ('/messages' if base.endswith('/v1') else '/v1/messages'),
                       json.dumps(payload, ensure_ascii=False).encode(),
-                      {'Content-Type': 'application/json', 'x-api-key': token,
+                      {'Content-Type': 'application/json', 'User-Agent': 'caigou-copilot/1.0', 'x-api-key': token,
                        'Authorization': 'Bearer ' + token, 'anthropic-version': '2023-06-01'})
     try:
         with urlopen(request, timeout=60) as response:
