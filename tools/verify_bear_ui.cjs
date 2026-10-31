@@ -1,5 +1,5 @@
 /* 安装本地验收依赖后运行：npm install --prefix .local-bear-qa playwright --no-save */
-const {chromium} = require('../.local-bear-qa/node_modules/playwright');
+const {chromium} = require(process.env.BEAR_PLAYWRIGHT || '../.local-bear-qa/node_modules/playwright');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -19,6 +19,7 @@ const fs = require('node:fs');
                 window.frappe = {session: {user: 'ui-test'}, call: async req => {
                     calls.push(req);
                     if (req.method.endsWith('chat_status')) return {message: {model_ready: window.ready}};
+                    if (req.method === 'suke_ops.bear_agent.chat') return {message: req.args.message === '打个招呼' ? {reply: '嗨，先放松肩膀，我陪你歇一会儿。'} : {module: 'control'}};
                     if (req.method.endsWith('start')) return {message: {name: 'TEST-TURN'}};
                     return {message: {state: 'done', answer: '<script>window.injected=true</script>总控已核查（模拟接口）'}};
                 }};
@@ -26,6 +27,10 @@ const fs = require('node:fs');
             for (const file of ['bear-pet.js', 'bear-control.js']) await page.addScriptTag({path: path.resolve('apps/suke_ops/suke_ops/public', file)});
             assert.equal(await page.evaluate(() => supplyBear.getSnapshot().connected), true);
             await page.locator('.chat-trigger').click();
+            await page.locator('textarea').fill('打个招呼');
+            await page.locator('button.send:not(.stop)').click();
+            await page.getByText('嗨，先放松肩膀，我陪你歇一会儿。', {exact: true}).waitFor();
+            assert.equal(await page.evaluate(() => calls.some(x => x.method.endsWith('start'))), false);
             await page.locator('textarea').fill('检查库存');
             await page.locator('button.send:not(.stop)').click();
             await page.waitForFunction(() => document.querySelector('[data-bear-pet]')?.shadowRoot?.textContent.includes('总控已核查') || [...document.querySelectorAll('*')].some(e => e.shadowRoot?.textContent.includes('总控已核查')));

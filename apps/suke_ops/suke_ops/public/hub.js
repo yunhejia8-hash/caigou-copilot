@@ -6,6 +6,7 @@ frappe.SupplyHub = class {
         if (typeof view === 'object') view = 'chat';
         this.caseName = options.caseName || null;
         this.orderName = options.orderName || null;
+        this.procurementProcess = options.procurementProcess || null;
         this.onNavigate = options.onNavigate || (() => {});
         if (this.caseName || this.orderName) module = 'buying';
         this.view = view;
@@ -15,7 +16,7 @@ frappe.SupplyHub = class {
         this.stages = {'buying-demand': '物料需求单', 'buying-inquiry': '询价', 'buying-comparison': '比价', 'buying-approval': '审批', 'buying-order': '采购', 'buying-receipt': '入库'};
         const mainModules = {...this.names};
         Object.assign(this.names, this.stages);
-        this.key = 'supply-hub:' + frappe.session.user + ':' + module + (this.caseName ? ':case:' + encodeURIComponent(this.caseName) : this.orderName ? ':order:' + encodeURIComponent(this.orderName) : '');
+        this.key = 'supply-hub:' + frappe.session.user + ':' + module + (this.caseName ? ':case:' + encodeURIComponent(this.caseName) : this.orderName ? ':order:' + encodeURIComponent(this.orderName) : this.procurementProcess ? ':procurement:' + encodeURIComponent(this.procurementProcess) : '');
         this.conversation = sessionStorage.getItem(this.key) || crypto.randomUUID();
         sessionStorage.setItem(this.key, this.conversation);
         this.turns = [];
@@ -26,7 +27,8 @@ frappe.SupplyHub = class {
         const tabs = Object.keys(navigation).length ? `<nav class="hub-tabs" aria-label="${module.startsWith('buying') ? '采购环节' : '模块工作台'}">${Object.entries(navigation).map(([key,label]) => `<a href="${this.moduleUrl(key)}" aria-current="${key === module ? 'page' : 'false'}">${key === 'control' ? '总控主页' : label}</a>`).join('')}</nav>` : '';
         this.host.addClass(view === 'chat' ? 'hub-chat-page' : 'hub-data-page');
         const inputId = 'hub-question-' + crypto.randomUUID();
-        this.host.html(view === 'chat' ? `${tabs}<div class="hub-workspace"><section class="hub-chat">
+        const procurementEntry = !options.embedded && ['control', 'buying'].includes(module) ? '<a class="hub-procurement-entry btn btn-default" style="display:inline-block;margin-bottom:12px" href="/desk/buying/procurement-workspace">采购流程与经验 →</a>' : '';
+        this.host.html(view === 'chat' ? `${procurementEntry}${tabs}<div class="hub-workspace"><section class="hub-chat">
             <div class="hub-chat-head"><div><b class="hub-agent-name">${this.names[module]} Agent</b><span class="hub-state"></span></div><button class="hub-new" type="button">新对话</button></div>
             <div class="hub-messages" aria-live="polite"></div><div class="hub-prompts"></div>
             <form class="hub-composer"><label for="${inputId}" class="sr-only">描述业务问题</label><textarea id="${inputId}" rows="2" maxlength="2000" placeholder="输入${this.names[module]}问题，Enter 发送，Shift+Enter 换行"></textarea><div><span>Shift+Enter 换行</span><button type="submit" class="hub-send">发送 ↑</button></div></form>
@@ -219,7 +221,7 @@ frappe.SupplyHub = class {
         }
         const selected = this.data.modules.find(module => module.module === this.module);
         const cards = selected ? selected.metrics.map(metric => ({...metric, module: selected.module})) : this.data.modules.map(module => ({...module.metrics[0], module: module.module, prefix: module.label}));
-        this.host.find('.hub-summary').html(cards.map(card => `${selected ? '<div class="hub-metric">' : `<a class="hub-metric" href="${this.dataUrl(card.module)}">`}<span>${this.esc(card.prefix ? card.prefix + ' · ' + card.label : card.label)}</span><strong>${card.value === null ? '—' : this.esc(card.value)}<small>${this.esc(card.unit)}</small></strong>${!selected ? '<em>查看模块数据 →</em>' : card.value === null ? '<em>当前账号无读取权限</em>' : ''}${selected ? '</div>' : '</a>'}`).join(''));
+        this.host.find('.hub-summary').html(cards.map(card => `${selected ? '<div class="hub-metric">'  : `<a class="hub-metric" href="${this.dataUrl(card.module)}">`}<span>${this.esc(card.prefix ? card.prefix + ' · ' + card.label : card.label)}</span><strong>${card.value === null ? '—' : this.esc(card.value)}<small>${this.esc(card.unit)}</small></strong>${!selected ? '<em>查看模块数据 →</em>' : card.value === null ? '<em>当前账号无读取权限</em>' : ''}${selected ? '</div>' : '</a>'}`).join(''));
         const signals = this.data.modules.flatMap(board => (board.signals || []).map(text => `<li>${selected ? '' : this.esc(board.label) + ' · '}${this.esc(text)}</li>`));
         this.host.find('.hub-risks').html(`<h3>${selected ? this.esc(selected.label) + '待跟进' : '待关注事项'}</h3>${signals.length ? '<ul class="hub-signals">' + signals.join('') + '</ul>' : '<p>当前可见数据未发现规则预警。</p>'}${this.data.cases.length ? `<details class="hub-case-list"><summary>供需异常案例 · ${this.data.cases.length}</summary>${this.data.cases.map(row => `<div class="hub-risk">${this.link('Supply Case', row.name, row.title)}</div>`).join('')}</details>` : ''}`);
         const approvals = [...this.data.approvals.map(row => ({...row, type: 'Operations Approval'})), ...this.data.decisions.map(row => ({...row, type: 'Supply Decision'}))];
@@ -472,7 +474,8 @@ frappe.SupplyHub = class {
         this.busy = true;
         this.renderBusy();
         try {
-            const response = await this.call('start', {question, module, client_version: 'procurement-approval-v1', conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario});
+            const response = await this.call('start', {question, module, client_version: 'procurement-approval-v1', conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario,
+                ...(this.procurementProcess ? {procurement_process: this.procurementProcess, procurement_stage: this.options.procurementStage || 'order'} : {})});
             const turn = {...response, question, agent_module: module, state: 'queued'};
             this.turns.push(turn);
             if (scenario.scenario_id === 6) { this.tracePreview = null; this.tracePrioritySelection = null; }

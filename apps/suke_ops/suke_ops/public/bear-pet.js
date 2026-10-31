@@ -141,10 +141,10 @@
       this.el['chat-title'].textContent = '和' + this.name + '聊聊天';
       this.el.chat.setAttribute('aria-label', '和' + this.name + '聊天');
       this.el.bear.setAttribute('aria-label', '摸摸' + this.name + '。双击打开聊天，方向键移动位置。');
-      this.el['chat-mode'].textContent = this.connected ? '已连接总控 Agent' : '内置互动模式 · 尚未接入 AI';
-      this.el['chat-footnote'].textContent = this.connected ? '由总控协调各部门；停止仅结束等待，后台任务可能继续。' : '当前使用预设互动回复，自由问答需接入网站 AI。';
+      this.el['chat-mode'].textContent = this.connected ? '小熊陪你聊 · 业务交给专业 Agent' : '内置互动模式 · 尚未接入 AI';
+      this.el['chat-footnote'].textContent = this.connected ? '闲聊由小熊回复，业务按需转交；停止等待不取消后台任务。' : '当前使用预设互动回复，自由问答需接入网站 AI。';
       this.el.shell.style.setProperty('--pet-size', this.size + 'px');
-      this._message('assistant', this.connected ? '恭喜发财！我是' + this.name + '，有什么需要我帮忙的？' : '恭喜发财！我是' + this.name + '。现在是内置互动模式，可以陪你聊天打招呼、给你鼓励。自由问答需要接入你的网站 AI。');
+      this._message('assistant', this.connected ? '嗨，我是' + this.name + '。想聊两句、歇口气，还是一起看看工作上的事？' : '恭喜发财！我是' + this.name + '。现在是内置互动模式，可以陪你聊天打招呼、给你鼓励。自由问答需要接入你的网站 AI。');
       (document.body || document.documentElement).appendChild(this.host);
     }
 

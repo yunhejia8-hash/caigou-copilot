@@ -1,0 +1,14 @@
+# 显式叠加使用，不覆盖已有compose.yaml或.env。
+services:
+  initialize:
+    image: caigou-copilot:procurement-local
+  backend:
+    image: caigou-copilot:procurement-local
+  frontend:
+    image: caigou-copilot:procurement-local
+  worker:
+    image: caigou-copilot:procurement-local
+  scheduler:
+    image: caigou-copilot:procurement-local
+  websocket:
+    image: caigou-copilot:procurement-local

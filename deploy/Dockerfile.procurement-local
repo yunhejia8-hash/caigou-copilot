@@ -1,0 +1,5 @@
+# 本机增量镜像依赖已有focus镜像；正式全量构建仍使用根目录Dockerfile。
+FROM caigou-copilot:focus
+# 完整复制本次应用源码，确保目录、模型提示和两模块安装钩子与PR一致。
+COPY --chown=frappe:frappe apps/suke_ops/suke_ops/ /home/frappe/frappe-bench/apps/suke_ops/suke_ops/
+COPY --chown=frappe:frappe apps/erpnext/erpnext/buying/page/ /home/frappe/frappe-bench/apps/erpnext/erpnext/buying/page/

@@ -1,12 +1,12 @@
-/* 小熊复用登录账号的总控会话；模型调用和业务权限仍由服务端处理。 */
+/* 小熊独立陪聊，业务转交现有模块；权限仍由服务端处理。 */
 (() => {
     function createChat(frappe) {
         let pending = null;
         let pendingAt = 0;
         let sending = false;
-        let fallbackConversation = crypto.randomUUID();
+        const fallbackConversations = {};
         const userError = message => Object.assign(new Error(message), {userMessage: message});
-        const key = 'supply-hub:' + frappe.session.user + ':control';
+        const names = {control: '总控', buying: '采购', selling: '销售', stock: '库存', manufacturing: '生产'};
         const call = async (method, args = {}) => {
             const response = await frappe.call({method: 'suke_ops.hub.' + method, args});
             if (response.exc || response.message == null) throw userError('总控请求失败，请重试。');
@@ -21,29 +21,36 @@
             signal.addEventListener('abort', stop, {once: true});
             if (signal.aborted) stop();
         });
-        return async ({message, signal}) => {
+        return async ({message, history = [], signal}) => {
             aborted(signal);
             if (sending) throw userError('上一条分析尚未完成，请稍候。');
             if (!message.trim() || message.length > 2000) throw userError('请输入 1–2000 字的问题。');
             sending = true;
             try {
-                if (pending) {
-                    const previous = await call('poll', {name: pending});
-                    aborted(signal);
-                    // start 会清理账号内超过 16 分钟的卡住任务，不能在前端永久拦住它。
-                    if (!['done', 'failed'].includes(previous.state) && Date.now() - pendingAt < 960000) throw userError('上一条分析仍在后台运行，请稍后重试。');
-                    pending = null;
-                }
                 const status = await call('chat_status');
                 aborted(signal);
                 if (!status.model_ready) throw userError('尚未配置模型服务，请联系管理员。');
+                const decision = (await frappe.call({method: 'suke_ops.bear_agent.chat', args: {message, history: JSON.stringify(history.slice(-6))}})).message;
+                aborted(signal);
+                if (typeof decision?.reply === 'string' && decision.reply.trim()) return decision.reply;
+                const module = decision?.module;
+                if (!Object.hasOwn(names, module)) throw userError('小熊没能确定转交对象，请再说具体一点。');
+                if (pending) {
+                    const previous = await call('poll', {name: pending});
+                    aborted(signal);
+                    if (!['done', 'failed'].includes(previous.state) && Date.now() - pendingAt < 960000) throw userError('上一条分析仍在后台运行，请稍后重试。');
+                    pending = null;
+                }
+                const key = 'supply-hub:' + frappe.session.user + ':' + module;
+                // 跨模块追问保留双方线索；旧回答必须重新核实，旧指令不能成为新的执行授权。
+                const context = history.slice(-4).map(row => ({role:row.role,content:row.content.slice(0,450)}));
                 let conversation;
                 try { conversation = sessionStorage.getItem(key); } catch (_) { /* 禁用存储时使用本次会话 */ }
-                conversation = conversation || fallbackConversation;
-                fallbackConversation = conversation;
+                conversation = conversation || fallbackConversations[module] || crypto.randomUUID();
+                fallbackConversations[module] = conversation;
                 try { sessionStorage.setItem(key, conversation); } catch (_) { /* 不在浏览器存储业务内容 */ }
                 // 不取消已提交的 start 请求，确保取得任务编号，避免停止后盲目重复创建任务。
-                const turn = await call('start', {question: message, module: 'control', conversation, request_id: crypto.randomUUID(),
+                const turn = await call('start', {question:message, handoff_context:JSON.stringify(context), module, conversation, request_id: crypto.randomUUID(),
                     ...(typeof status.client_version === 'string' ? {client_version: status.client_version} : {})});
                 pending = turn.name;
                 pendingAt = Date.now();
@@ -54,13 +61,13 @@
                     aborted(signal);
                     if (['done', 'failed'].includes(result.state)) {
                         pending = null;
-                        if (result.state === 'failed') throw userError('总控分析未完成，请到总控主页查看记录后重试。');
-                        if (typeof result.answer !== 'string' || !result.answer.trim()) throw userError('总控未返回有效答复，请到总控主页查看记录。');
-                        return result.answer + '\n\n详细协作记录、草稿与审批入口请到总控主页查看。';
+                        if (result.state === 'failed') throw userError(names[module] + '分析未完成，请到对应Agent主页查看记录后重试。');
+                        if (typeof result.answer !== 'string' || !result.answer.trim()) throw userError(names[module] + '未返回有效答复，请到对应Agent主页查看记录。');
+                        return '【' + names[module] + ' Agent】\n' + result.answer + '\n\n协作记录、草稿和审批请到对应Agent主页查看。';
                     }
                     await wait(signal);
                 }
-                throw userError('分析仍在后台运行，请到总控主页查看记录。');
+                throw userError('分析仍在后台运行，请到对应Agent主页查看记录。');
             } finally { sending = false; }
         };
     }

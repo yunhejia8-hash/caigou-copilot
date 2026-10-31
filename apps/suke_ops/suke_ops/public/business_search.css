@@ -1,0 +1,34 @@
+.biz-search {color:var(--text-color); display:flex; flex-direction:column; max-height:calc(100vh - 160px); min-height:0;}
+.biz-search-launch {margin:12px 12px 4px; width:calc(100% - 24px); text-align:left;}
+.biz-form {display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;}
+.biz-query {flex:1; min-width:220px;}
+.biz-group {width:140px;}
+.biz-search-scope {display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+.biz-status,.biz-updated,.biz-hint,.biz-field-note {color:var(--text-muted); font-size:12px;}
+.biz-hint {margin:12px 0;}
+.biz-directory,.biz-records {max-height:55vh; overflow:auto; padding:2px; min-height:0; flex:1;}
+.biz-results {display:flex; flex-direction:column; min-height:0; flex:1;}
+.biz-form,.biz-search-scope,.biz-hint,.biz-browse-all,.biz-updated,.biz-results>h3,.biz-field-note {flex-shrink:0;}
+.biz-browse-all {align-self:flex-start;}
+.biz-search h4 {display:flex; justify-content:space-between; gap:12px; font-size:14px; margin:18px 0 8px;}
+.biz-search h4 small {color:var(--text-muted); font-weight:normal;}
+.biz-search h3 {font-size:16px; margin-top:20px;}
+.biz-entries {display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px;}
+.biz-entry,.biz-record {border:1px solid var(--border-color); background:var(--fg-color); color:var(--text-color); border-radius:8px; text-align:left; padding:12px; min-width:0;}
+.biz-entry:hover,.biz-record:hover {background:var(--control-bg);}
+.biz-entry:focus-visible,.biz-record:focus-visible {outline:2px solid var(--primary); outline-offset:2px;}
+.biz-entry>span,.biz-record {display:flex; justify-content:space-between; gap:12px;}
+.biz-entry small {display:block; color:var(--text-muted); font-size:12px; margin-top:4px;}
+.biz-record-list {display:grid; gap:6px;}
+.biz-record {width:100%; overflow-wrap:anywhere;}
+.biz-record>span {display:grid; gap:4px; min-width:0;}
+.biz-record small {flex-shrink:0; color:var(--text-muted); text-align:right;}
+.biz-record span span {font-size:12px; color:var(--text-muted);}
+.biz-pagination {display:flex; justify-content:space-between; gap:10px; align-items:center; margin:8px 0 18px; flex-wrap:wrap;}
+.biz-pagination small {color:var(--text-muted);}
+.biz-pagination button {background:var(--control-bg); border:1px solid var(--border-color); border-radius:6px; padding:5px 10px; margin-left:6px; color:var(--text-color);}
+.biz-empty {color:var(--text-muted); padding:18px 0;}
+.biz-updated {margin-top:14px;}
+.hub-search-link {border:0; background:transparent; color:var(--primary); padding:6px 0; font-size:12px; cursor:pointer; text-align:left;}
+.hub-metric[data-business-entry] {cursor:pointer; text-align:left; color:inherit;}
+@media (max-width:650px) {.biz-entries {grid-template-columns:1fr;} .biz-group {width:100%;} .biz-record small {font-size:10px;}}

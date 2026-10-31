@@ -1,0 +1,9 @@
+{
+ "doctype": "Page",
+ "name": "erp-connections",
+ "page_name": "erp-connections",
+ "module": "Supply Home",
+ "standard": "Yes",
+ "title": "企业数据连接",
+ "roles": []
+}

@@ -1,0 +1,9 @@
+{
+ "doctype": "Page",
+ "name": "procurement-workspace",
+ "page_name": "procurement-workspace",
+ "module": "Buying",
+ "standard": "Yes",
+ "title": "采购流程与经验",
+ "roles": []
+}
