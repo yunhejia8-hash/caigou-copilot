@@ -1,10 +1,13 @@
 /* 原生 Desk 对话与面板，业务单据继续使用 ERPNext 表单。 */
 frappe.SupplyHub = class {
-    constructor(page) {
+    constructor(page, options = {}) {
+        this.caseName = options.caseName || null;
+        this.onNavigate = options.onNavigate || (() => {});
+        const inputId = 'hub-question-' + crypto.randomUUID();
         this.page = page;
-        this.module = 'control';
+        this.module = this.caseName ? 'buying' : 'control';
         this.names = {control: '总控', buying: '采购', selling: '销售', stock: '库存', manufacturing: '生产'};
-        this.key = 'supply-hub:' + frappe.session.user;
+        this.key = 'supply-hub:' + frappe.session.user + (this.caseName ? ':case:' + encodeURIComponent(this.caseName) : '');
         this.conversation = sessionStorage.getItem(this.key) || crypto.randomUUID();
         sessionStorage.setItem(this.key, this.conversation);
         this.turns = [];
@@ -19,7 +22,7 @@ frappe.SupplyHub = class {
                 <div class="hub-chat-head"><div><span class="hub-avatar">协</span><b class="hub-agent-name">总控 Agent</b><span class="hub-state">连接中</span></div><button class="hub-new" type="button">新对话</button></div>
                 <div class="hub-messages" aria-live="polite"></div>
                 <div class="hub-prompts"></div>
-                <form class="hub-composer"><label for="hub-question" class="sr-only">描述你的业务问题</label><textarea id="hub-question" rows="3" maxlength="2000" placeholder="例如：连接器延期了，先保重点客户还是明天的生产？"></textarea><div><span>Agent 查询与准备草稿 · 人员选择与审批</span><button type="submit" class="hub-send">发送 ↑</button></div></form>
+                <form class="hub-composer"><label for="${inputId}" class="sr-only">描述你的业务问题</label><textarea id="${inputId}" rows="3" maxlength="2000" placeholder="例如：连接器延期了，先保重点客户还是明天的生产？"></textarea><div><span>Agent 查询与准备草稿 · 人员选择与审批</span><button type="submit" class="hub-send">发送 ↑</button></div></form>
                 <p class="hub-model-note"></p>
             </section><aside class="hub-aside"><section class="hub-panel hub-actions"></section><section class="hub-panel hub-risks"></section><section class="hub-panel hub-approvals"></section></aside></div>
             <section class="hub-panel hub-detail"></section><div class="hub-updated"></div>`);
@@ -44,6 +47,7 @@ frappe.SupplyHub = class {
         });
         this.host.on('click', '[data-doctype]', (event) => {
             const {doctype, docname} = event.currentTarget.dataset;
+            this.onNavigate();
             frappe.set_route(docname ? ['Form', doctype, docname] : ['List', doctype]);
         });
         this.host.on('click', '[data-draft]', async (event) => {
@@ -53,12 +57,20 @@ frappe.SupplyHub = class {
             try {
                 const doc = await this.call('open_draft', {name: button.attr('data-draft'), index: button.attr('data-index')});
                 const synced = frappe.model.sync(doc);
+                this.onNavigate();
                 frappe.set_route('Form', synced[0].doctype, synced[0].name);
             } catch (_) { /* frappe.call 显示服务端错误，保留重试入口。 */ }
             finally { button.prop('disabled', false); }
         });
+        if (this.caseName) {
+            this.host.addClass('hub-case-chat');
+            this.host.find('textarea').attr('maxlength', Math.max(1, 2000 - this.contextPrefix().length));
+        }
         this.refresh();
         this.restore();
+    }
+    contextPrefix() {
+        return this.caseName ? `当前供应异常单号：${JSON.stringify(this.caseName)}。请先读取该单最新数据，保持已有预留，不将未确认供应计入可用；涉及方案选择、审批与执行时引导用户回原异常页面确认。\n采购员问题：` : '';
     }
     esc(value) { return frappe.utils.escape_html(String(value ?? '')); }
     answer(value) {
@@ -111,7 +123,8 @@ frappe.SupplyHub = class {
             manufacturing: ['列出未完成工单，检查生产供料风险。', '查看工单，帮我准备完工入库草稿。']
         }[this.module];
         const firstCase = this.data.cases.find(row => (row.title || '').includes('负责人决策现场')) || this.data.cases[0];
-        if (firstCase) prompts.push(`分析异常 ${firstCase.name}，比较销售优先与生产优先，交给负责人选择。`);
+        if (this.caseName) prompts.splice(0, prompts.length, '现在缺多少料？哪些需求受到影响？', '比较销售优先与生产优先，说明各自影响。', '有哪些到货条件还需要向供应商确认？');
+        else if (firstCase) prompts.push(`分析异常 ${firstCase.name}，比较销售优先与生产优先，交给负责人选择。`);
         this.host.find('.hub-prompts').html(prompts.map(prompt => `<button type="button" data-prompt="${this.esc(prompt)}">${this.esc(prompt)}</button>`).join(''));
         const modules = selected ? [selected] : this.data.modules;
         this.host.find('.hub-actions').html(`<div class="hub-section-label">手动业务入口</div><h3>熟悉的操作，都在这里</h3>${modules.map(module => `<div class="hub-entry-group"><small>${this.esc(module.label)}</small><div>${module.links.slice(0, selected ? 20 : 3).map(link => this.link(link.doctype, null, link.label)).join('')}</div></div>`).join('')}`);
@@ -140,8 +153,10 @@ frappe.SupplyHub = class {
         this.host.find('.hub-new').prop('disabled', this.restoring || this.busy);
     }
     async send() {
-        const question = this.host.find('textarea').val().trim();
-        if (!question || this.restoring || this.busy || !this.data?.model_ready) return;
+        const input = this.host.find('textarea').val().trim();
+        const question = this.contextPrefix() + input;
+        if (!input || this.restoring || this.busy || !this.data?.model_ready) return;
+        if (question.length > 2000) return frappe.msgprint('问题过长，请缩短后重试。');
         this.busy = true;
         this.renderBusy();
         try {

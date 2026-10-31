@@ -5,6 +5,31 @@
   const link = (type, name) => `<a href="/app/${frappe.router.slug(type)}/${encodeURIComponent(name)}">${esc(name)}</a>`;
   const num = value => Number(value || 0).toLocaleString('zh-CN', {maximumFractionDigits: 2});
   const table = (heads, rows) => `<div style="overflow:auto"><table class="table table-bordered"><thead><tr>${heads.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  async function openPurchaseChat(frm) {
+    if (frm.is_new() || frm.is_dirty()) {
+      frappe.msgprint('请先保存异常单，再打开采购对话。对话只读取已保存的数据。');
+      return;
+    }
+    const name = frm.doc.name;
+    if (frm.purchase_chat?.caseName === name) {
+      frm.purchase_chat.dialog.show();
+      frm.purchase_chat.hub.refresh();
+      return;
+    }
+    if (frm.purchase_chat_loading) return;
+    frm.purchase_chat_loading = true;
+    try {
+      await frappe.require(['/assets/suke_ops/hub.js', '/assets/suke_ops/hub.css']);
+      // 资源加载期间可能切换或修改单据，不将旧上下文带到新页面。
+      if (frm.doc.name !== name || frm.is_dirty()) return;
+      const dialog = new frappe.ui.Dialog({title: '采购对话 · ' + name, size: 'extra-large', fields: [{fieldname: 'chat', fieldtype: 'HTML'}]});
+      const hub = new frappe.SupplyHub({main: dialog.fields_dict.chat.$wrapper}, {caseName: name, onNavigate: () => dialog.hide()});
+      frm.purchase_chat = {caseName: name, dialog, hub};
+      dialog.show();
+    } catch (_) {
+      frappe.msgprint('采购对话加载失败，请重试或进入协同主页。');
+    } finally { frm.purchase_chat_loading = false; }
+  }
   async function render(frm) {
     const host = frm.fields_dict.dashboard.$wrapper;
     host.html('<p class="text-muted">正在读取库存、销售与生产需求…</p>');
@@ -38,7 +63,7 @@
       });
     } catch (error) { host.html('<p class="text-danger">实时分析失败，请检查提示后重试。</p>'); throw error; }
   }
-  frappe.ui.form.on('Supply Case', {refresh(frm) { if (!frm.is_new()) { render(frm); frm.add_custom_button('实时刷新', () => render(frm)); } }});
+  frappe.ui.form.on('Supply Case', {refresh(frm) { if (!frm.is_new()) { render(frm); frm.add_custom_button('实时刷新', () => render(frm)); frm.add_custom_button('采购对话', () => openPurchaseChat(frm)); } }});
   frappe.ui.form.on('Supply Decision', {refresh(frm) {
     if (frm.is_new()) return;
     const state = frm.doc.workflow_state;

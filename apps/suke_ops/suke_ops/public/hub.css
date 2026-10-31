@@ -11,3 +11,12 @@
 @media(max-width:800px){.hub-layout{grid-template-columns:1fr}.hub-aside{grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}.hub-heading{align-items:start}.hub-heading h1{font-size:20px}.hub-heading p{font-size:11px}.hub-summary{grid-template-columns:repeat(2,1fr)}.hub-tabs button{padding:12px}.hub-flow{flex-wrap:wrap}.hub-messages{max-height:440px}.hub-composer{margin:0 14px 10px}.hub-refresh{font-size:11px!important}.hub-prompts{margin-left:14px}}
 
 .hub-message>div.hub-markdown{white-space:normal;overflow-x:auto}.hub-markdown h1,.hub-markdown h2,.hub-markdown h3{font-size:16px;line-height:1.6;margin:15px 0 10px}.hub-markdown p{margin:8px 0}.hub-markdown table{border-collapse:collapse;white-space:nowrap;font-size:11px}.hub-markdown th,.hub-markdown td{padding:8px;border:1px solid #e2e9e4}.hub-markdown ul,.hub-markdown ol{padding-left:22px}.hub-markdown pre{white-space:pre-wrap}
+
+/* 异常单内嵌对话沿用同一 Agent，只隐藏主页导航与重复面板。 */
+.supply-hub.hub-case-chat { padding: 0; }
+.hub-case-chat .hub-heading, .hub-case-chat .hub-tabs,
+.hub-case-chat .hub-summary, .hub-case-chat .hub-aside,
+.hub-case-chat .hub-detail, .hub-case-chat .hub-updated { display: none; }
+.hub-case-chat .hub-layout { display: block; }
+.hub-case-chat .hub-chat { min-height: 0; }
+.hub-case-chat .hub-messages { height: min(44vh, 420px); min-height: 200px; }

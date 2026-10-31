@@ -60,3 +60,12 @@ python tools/verify_realtime.py
 本次已在用户明确授权后，用 `api.deepseek.com` 对合成数据完成真实总控和四模块协作，记录见 [model-live.json](verification/model-live.json)。工具协议参考 [DeepSeek Anthropic 兼容说明](https://api-docs.deepseek.com/guides/anthropic_api/)。部署到其他环境时需自行配置模型服务并明确业务数据的外发授权，仓库不附带凭据。
 
 启动前在 PowerShell 环境中配置上述三个 `ANTHROPIC_*` 变量，或写入仅本地的 `.env`；服务读取后端环境变量。更新代码后执行 `docker compose up -d --build`，如有单据结构变更再运行 `docker compose exec -T backend bench --site focus.local migrate`。
+
+
+## 供应异常单内采购对话
+
+在已保存的 `Supply Case` 表单工具栏点击 **采购对话**，无需跳转即可向现有采购 Agent 提问，例如“现在缺多少料？”、“比较销售优先与生产优先”或“有哪些到货条件还需要确认？”。每次提问带入当前异常单号，由现有服务端工具读取最新数据并校验权限。未保存的修改须先保存。
+
+弹窗复用协同主页的真实模型、工具白名单、后台队列和草稿入口；不引入原型的固定口令解析器或合成订单。会话按当前账号和异常单隔离，关闭后重新打开可继续；未配置模型时发送不可用，不伪造回答。模型只查询、分析及准备现有工具支持的未保存草稿，方案选择、审批与执行仍回原页面进行。部署前沿用上文模型配置及业务数据外发授权要求。
+
+更新后运行 `bench build --app suke_ops` 并清理站点缓存，或按上文 Docker 构建流程部署。前端回归测试：`node --test tests/test_purchase_chat.cjs`。测试无需模型凭据；真实 Frappe 页面与模型联调需部署环境验收。
