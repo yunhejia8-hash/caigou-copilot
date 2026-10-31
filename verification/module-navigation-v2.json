@@ -1,0 +1,22 @@
+[
+  {
+    "module": "manufacturing",
+    "url": "http://127.0.0.1:8081/desk/manufacturing/operations-manufacturing",
+    "agent": "生产 Agent"
+  },
+  {
+    "module": "buying",
+    "url": "http://127.0.0.1:8081/desk/buying/operations-buying",
+    "agent": "采购 Agent"
+  },
+  {
+    "module": "selling",
+    "url": "http://127.0.0.1:8081/desk/selling/operations-selling",
+    "agent": "销售 Agent"
+  },
+  {
+    "module": "stock",
+    "url": "http://127.0.0.1:8081/desk/stock/operations-stock",
+    "agent": "库存 Agent"
+  }
+]

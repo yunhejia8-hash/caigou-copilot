@@ -134,34 +134,17 @@ def customize_navigation():
         for row in doc.items:
             row.hidden = int(row.link_to not in keep)
         doc.save()
-    menus = {
-        'Buying': [('Supply Case', '异常决策 Agent'), ('Supply Decision', '跨模块审批'), ('Material Request', '采购申请'), ('Request for Quotation', '询价'),
-                   ('Supplier Quotation', '供应商报价'), ('Purchase Order', '采购订单'), ('Purchase Receipt', '收货与退货'), ('Quality Inspection', '到货质检'),
-                   ('Purchase Invoice', '采购账单'), ('Payment Entry', '收付款记录'), ('Supplier', '供应商'), ('Item', '物料'), ('Contact', '联系人'), ('Address', '地址')],
-        'Selling': [('Supply Case', '交付风险与方案'), ('Supply Decision', '跨模块审批'), ('Customer', '客户'), ('Quotation', '销售报价'),
-                    ('Sales Order', '销售订单'), ('Delivery Note', '发货与退货'), ('Sales Invoice', '销售账单'), ('Payment Entry', '收付款记录')],
-        'Stock': [('Supply Case', '缺料与分配方案'), ('Supply Decision', '跨模块审批'), ('Item', '物料'), ('Warehouse', '仓库'), ('Stock Reservation Entry', '库存预留与释放'),
-                  ('Stock Entry', '出入库与调拨'), ('Stock Reconciliation', '盘点'), ('Batch', '批次'), ('Quality Inspection', '质量检验')],
-        'Manufacturing': [('Supply Case', '缺料影响与方案'), ('Supply Decision', '跨模块审批'), ('BOM', '物料清单'), ('Production Plan', '生产计划'),
-                          ('Work Order', '生产工单'), ('Stock Entry', '领退料与完工入库'), ('Stock Reservation Entry', '生产库存预留'), ('Job Card', '工序执行')],
-    }
-    reports = {'Buying': ['Supplier Quotation Comparison', 'Procurement Tracker'], 'Selling': ['Sales Order Analysis'],
-               'Stock': ['Stock Balance', 'Stock Ledger', 'Stock Projected Qty', 'Item Shortage Report'], 'Manufacturing': ['Production Planning Report']}
-    for module, links in menus.items():
-        links.insert(2, ('Operations Approval', '业务单据审批'))
+    # 仅收起导航，业务表、权限和原生单据链接仍保留。
+    for module in ['Buying', 'Selling', 'Stock', 'Manufacturing']:
         base = get_site_sidebar_layer(module)
-        desired = [{'type': 'Link', 'label': '对话与数据面板', 'link_type': 'Page', 'link_to': 'operations-hub',
-                    'added': 1, 'hidden': 0, 'open_in_new_tab': 0, 'icon': 'message-circle'}]
-        for target, label in links:
-            matching = next((r for r in base if r.get('link_type') == 'DocType' and r.get('link_to') == target), None)
-            desired.append({**matching, 'label': label, 'hidden': 0, 'child': 0, 'indent': 0, 'open_in_new_tab': 0} if matching else
-                           {'type': 'Link', 'label': label, 'link_type': 'DocType', 'link_to': target, 'added': 1, 'hidden': 0, 'open_in_new_tab': 0})
-        for target in reports.get(module, []):
-            if not frappe.db.exists('Report', target):
-                continue
-            matching = next((r for r in base if r.get('link_type') == 'Report' and r.get('link_to') == target), None)
-            desired.append({**matching, 'hidden': 0, 'child': 0, 'indent': 0} if matching else
-                           {'type': 'Link', 'label': target, 'link_type': 'Report', 'link_to': target, 'added': 1, 'hidden': 0})
-        ids = {(r.get('link_type'), r.get('link_to')) for r in desired}
-        desired += [{**r, 'hidden': 1} for r in base if (r.get('link_type'), r.get('link_to')) not in ids]
+        slug = {'Buying': 'buying', 'Selling': 'selling', 'Stock': 'stock', 'Manufacturing': 'manufacturing'}[module]
+        label = {'Buying': '采购', 'Selling': '销售', 'Stock': '库存', 'Manufacturing': '生产'}[module]
+        entries = [(label + '工作台', 'operations-' + slug, 'message-circle'),
+                   ('总控主页', 'operations-hub', 'home'), ('全局数据', 'operations-data', 'list')]
+        desired = [{'type': 'Link', 'label': label, 'link_type': 'Page', 'link_to': target,
+                    'added': 1, 'hidden': 0, 'open_in_new_tab': 0, 'icon': icon}
+                   for label, target, icon in entries]
+        targets = {row[1] for row in entries}
+        desired += [{**row, 'hidden': 1} for row in base
+                    if not (row.get('link_type') == 'Page' and row.get('link_to') in targets)]
         save_site_sidebar(module, items=desired)
