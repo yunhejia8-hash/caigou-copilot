@@ -152,3 +152,142 @@ test('completed discussion collapses audit but running discussion shows incremen
  h.turns[0].state='done';h.turns[0].answer='当前自由量200件；确定量缺口360件。';h.renderMessages();
  assert.match(html,/<details data-audit-key="process-T">/);assert.ok(html.indexOf('当前自由量')<html.indexOf('逐步查询与反馈'));assert.ok(!html.includes('<details open'));
 });
+
+function priorityHub(Hub) {
+ const h=Object.create(Hub.prototype);
+ h.esc=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+ h.answer=h.esc;
+ return h;
+}
+function prioritySnapshot(manual=false) {
+ return {scenario_key:'connector-1286',snapshot_version:'test',calculation:{free_stock:200,gross_demand:560,free_quantity_gap:360},rich_sources:[],
+  priority_policy:{mode:manual?'manual':'due_time',order:manual?['WO-B','WO-A']:['WO-A','WO-B'],reason:manual?'B 有客户验收窗口':'默认按需料时点先后',recorded_by:'buyer@example.invalid',recorded_at:'2026-11-02 09:20:00',version:'policy-v1'},
+  priority_assessment:{status:'assessed',summary:manual?'先保 B；条件成立后 A 还缺 80 件。':'默认 A 先用料，仍需校验。',tradeoff:manual?'A 的齐料受到影响。':'B 的齐料受到影响。',
+   ranked_orders:[{id:'WO-B',sales_order:'SO-B',quantity:320,material_required_at:'2026-11-03 13:00'},{id:'WO-A',sales_order:'SO-A',quantity:240,material_required_at:'2026-11-03 09:00'}],
+   allocations:[{work_order:'WO-B',sales_order:'SO-B',required:320,confirmed_allocated:200,confirmed_gap:120,conditional_allocated:320,conditional_gap:0,priority:1},{work_order:'WO-A',sales_order:'SO-A',required:240,confirmed_allocated:0,confirmed_gap:240,conditional_allocated:160,conditional_gap:80,priority:2}],
+   totals:{confirmed_supply:200,demand:560,confirmed_gap:360,conditional_supply:480,conditional_gap:80},conditions:['C 预留调整仍须批准'],rules:[{id:'stock-bound',label:'可用库存',kind:'hard',description:'待检不计入确定供给',source_title:'规则依据',source_url:'https://example.invalid/rule'}],execution_authorized:false}};
+}
+test('priority preview requires a reason and uses server assessment before starting',async()=>{
+ const {Hub,context,messages}=environment(),h=sender(Hub,{caseName:''});let prompt;
+ h.tracePreview=prioritySnapshot();
+ context.frappe.prompt=(fields,callback)=>{prompt={fields,callback};};
+ h.priorityDialog();assert.match(prompt.fields[0].default,/WO-A/);
+ await prompt.callback({first_order:prompt.fields[0].options[1],reason:'  '});
+ await prompt.callback({first_order:prompt.fields[0].options[1],reason:'字'.repeat(301)});
+ assert.equal(h.calls.length,0);assert.equal(messages.length,2);
+ h.call=async(method,args)=>{h.calls.push({method,args});return prioritySnapshot(true);};
+ await prompt.callback({first_order:prompt.fields[0].options[1],reason:' B 有客户验收窗口 '});
+ assert.equal(h.calls[0].method,'scenario_preview');
+ assert.equal(h.calls[0].args.priority_order,'["WO-B","WO-A"]');
+ assert.equal(h.tracePrioritySelection.reason,'B 有客户验收窗口');
+ h.call=async(method,args)=>{h.calls.push({method,args});return {name:'TURN-2'};};
+ await h.runTracePreview();
+ assert.equal(h.calls[1].method,'start');assert.equal(h.calls[1].args.scenario_id,6);
+ assert.equal(h.calls[1].args.priority_order,'["WO-B","WO-A"]');
+ assert.equal(h.calls[1].args.priority_reason,'B 有客户验收窗口');
+ assert.equal(h.calls[1].args.recorded_by,undefined);assert.equal(h.calls[1].args.priority_assessment,undefined);
+ assert.equal(h.tracePreview,null);assert.equal(h.tracePrioritySelection,null);
+});
+test('priority preview stays available if start fails; default run is not labeled manual',async()=>{
+ const {Hub}=environment(),h=sender(Hub,{caseName:''});
+ h.tracePreview=prioritySnapshot();h.tracePrioritySelection=null;
+ h.call=async(method,args)=>{h.calls.push({method,args});throw new Error('offline');};
+ await h.runTracePreview();
+ assert.equal(h.calls[0].args.priority_order,undefined);assert.equal(h.calls[0].args.priority_reason,undefined);
+ assert.equal(h.tracePreview.scenario_key,'connector-1286');
+});
+test('completed connector priority review sends previous turn and choices without forging attribution',async()=>{
+ const {Hub,context}=environment(),h=sender(Hub,{caseName:''});let prompt;
+ h.turns=[{name:'OLD',state:'done',verified_evidence:prioritySnapshot(true)}];
+ context.frappe.prompt=(fields,callback)=>{prompt={fields,callback};};
+ h.priorityDialog('OLD');assert.match(prompt.fields[0].default,/WO-B/);
+ await prompt.callback({first_order:prompt.fields[0].options[0],reason:'A 的整批交付窗口已确认'});
+ assert.equal(h.calls[0].args.previous_turn,'OLD');assert.equal(h.calls[0].args.priority_order,'["WO-A","WO-B"]');
+ assert.equal(h.calls[0].args.scenario_id,undefined);assert.equal(h.calls[0].args.priority_policy,undefined);
+});
+test('priority panel separates default policy, real attribution, conditional allocation and rule sources',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub),snapshot=prioritySnapshot();
+ const initial=h.priorityPanel(snapshot,'preview');
+ assert.match(initial,/默认按需料时点/);assert.match(initial,/非人工指定/);assert.match(initial,/仅预览/);
+ snapshot.priority_policy=prioritySnapshot(true).priority_policy;
+ snapshot.priority_policy.reason='<script>reason</script>';
+ snapshot.priority_assessment.rules.push({id:'unsafe',label:'<rule>',kind:'hard',description:'test',source_title:'text',source_url:'javascript:alert(1)'});
+ const html=h.priorityPanel(snapshot,'TURN');
+ assert.match(html,/WO-B → WO-A/);assert.match(html,/buyer@example.invalid/);assert.match(html,/版本 policy-v1/);
+ assert.match(html,/条件全部落实后/);assert.match(html,/数量覆盖不等于已按时齐料/);assert.match(html,/未授权执行/);
+ assert.match(html,/https:\/\/example.invalid\/rule/);assert.ok(!html.includes('href="javascript:'));
+ assert.match(html,/&lt;script&gt;reason/);assert.ok(!html.includes('<script>'));
+ assert.ok(!html.includes('<details open'));
+});
+test('unverified human changes suppress all allocations even if old numbers remain in payload',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub),snapshot=prioritySnapshot(true);
+ snapshot.priority_assessment.status='needs_verification';snapshot.priority_assessment.summary='新增信息尚未核实';
+ const html=h.priorityPanel(snapshot,'TURN');
+ assert.match(html,/信息待核实，暂不显示分配/);assert.match(html,/新增信息尚未核实/);
+ assert.ok(!html.includes('hub-priority-table'));assert.ok(!html.includes('确定供给 200'));
+});
+test('changed supplier quantity uses current priority outcome and labels old A-first plan historical',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub),snapshot=prioritySnapshot(true);
+ snapshot.change={from_quantity:200,to_quantity:120,impact:'旧影响：B 必缺 80',affected_plan:'OLD',updated_plan:'NEW',affected_records:['WO-A','WO-B'],unchanged_constraints:'不得动待检'};
+ snapshot.plan={id:'OLD',status:'候选',conditions:[]};
+ const html=h.scenarioBrief(snapshot,'TURN');
+ assert.match(html,/先保 B；条件成立后 A 还缺 80 件/);assert.match(html,/具体影响哪张工单，见下方本次排序/);
+ assert.match(html,/历史基线候选方案（非本次排序结果）/);assert.ok(!html.includes('旧影响：B 必缺 80'));
+});
+test('current priority calculation precedes true coordinator response without replacing discussion history',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub);let html='';
+ const node={scrollTop:0,scrollHeight:300,clientHeight:300,querySelectorAll:()=>[]};
+ h.host={find:()=>({0:node,html:v=>{html=v;},scrollTop:()=>{}})};
+ h.names={control:'总控'};h.auditTrail=()=>'<div>原有四阶段协作过程</div>';
+ h.turns=[{name:'T',question:'先保B',state:'done',answer:'模型总控原始建议：需再核实到仓时间。',events:[{}],synthetic:true,verified_evidence:prioritySnapshot(true)}];
+ h.renderMessages();
+ assert.match(html,/模型总控原始建议/);assert.match(html,/原有四阶段协作过程/);assert.match(html,/data-priority-review="T"/);
+ assert.ok(html.indexOf('按本次排序的数量校验')<html.indexOf('模型总控原始建议'));
+ assert.match(html,/总控建议（待复核）/);assert.match(html,/<details data-audit-key="process-T">/);
+});
+
+test('pending verification labels ranked rows as historical and hides stale snapshot metrics',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub),snapshot=prioritySnapshot(true);
+ snapshot.priority_assessment.status='needs_verification';
+ snapshot.priority_assessment.basis='历史需求待核验；排序表不代表当前需求已确认。';
+ const html=h.scenarioBrief(snapshot,'TURN');
+ assert.match(html,/历史需求记录 · 待核验/);assert.match(html,/排序表不代表当前需求已确认/);
+ assert.ok(!html.includes('hub-case-metrics'));assert.ok(!html.includes('hub-priority-table'));
+ assert.match(html,/WO-B \/ SO-B/); // Original demand stays traceable but explicitly qualified.
+});
+test('current turn policy overrides older snapshot defaults and keeps Chinese rule classifications',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub),snapshot=prioritySnapshot(),current=prioritySnapshot(true);
+ current.priority_assessment.rules=[{id:'r1',kind:'企业策略',label:'订单先后',description:'人工选择'},
+  {id:'r2',kind:'本案例硬约束',label:'预留控制',description:'未批准不可动'},
+  {id:'r3',kind:'本案例口径',label:'关联需求',description:'不能重复计算'}];
+ const html=h.priorityPanel(snapshot,'TURN',current);
+ assert.match(html,/WO-B → WO-A/);assert.ok(!html.includes('默认按需料时点'));
+ for(const kind of ['企业策略','本案例硬约束','本案例口径']) assert.ok(html.includes('>'+kind+'</span>'));
+ assert.match(html,/先保 B；条件成立后 A 还缺 80 件/);
+});
+test('full coordinator text remains available independently of arithmetic and old deterministic conclusion',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub);let html='';
+ const node={scrollTop:0,scrollHeight:300,clientHeight:300,querySelectorAll:()=>[]};
+ h.host={find:()=>({0:node,html:v=>{html=v;},scrollTop:()=>{}})};h.names={control:'总控'};
+ const snapshot=prioritySnapshot(true);snapshot.deterministic_conclusion='STALE_A_PRIORITY_CONCLUSION';
+ const original='总控真实回应。'+'核实到仓和批准条件。'.repeat(25)+'完整回应末尾。';
+ h.turns=[{name:'RAW',question:'B优先',state:'done',answer:original,synthetic:true,verified_evidence:snapshot}];
+ h.renderMessages();
+ assert.ok(html.includes(original));assert.ok(!html.includes(snapshot.deterministic_conclusion));
+ assert.match(html,/data-audit-key="outcome-RAW"/);assert.equal(h.turns[0].answer,original);
+});
+
+test('decision checks distinguish structured matches from unverified prose and show conflicts before advice',()=>{
+ const {Hub}=environment(),h=priorityHub(Hub);let html='';
+ assert.equal(h.decisionStatus(), '');
+ const matched=h.decisionStatus({status:'matched',summary:'数量、排序和执行字段一致'});
+ assert.match(matched,/结构化字段一致/);assert.match(matched,/文字建议仍待复核/);assert.match(matched,/不认证模型自然语言/);
+ const pending=h.decisionStatus({status:'unverified',reason:'缺少结构化字段',issues:['<script>问题</script>']});
+ assert.match(pending,/总控建议尚未核验/);assert.match(pending,/缺少结构化字段/);assert.match(pending,/&lt;script&gt;/);assert.ok(!pending.includes('<script>'));
+ const node={scrollTop:0,scrollHeight:300,clientHeight:300,querySelectorAll:()=>[]};
+ h.host={find:()=>({0:node,html:v=>{html=v;},scrollTop:()=>{}})};h.names={control:'总控'};
+ h.turns=[{name:'CHECK',question:'核查',state:'done',answer:'保留模型实际答复',synthetic:true,verified_evidence:prioritySnapshot(true),decision_check:{status:'mismatch',summary:'工单顺序与本次设置不一致',issues:['请按 B 优先重新复核']}}];
+ h.renderMessages();assert.match(html,/不能作为已核验方案/);assert.match(html,/请按 B 优先重新复核/);
+ assert.ok(html.indexOf('总控建议存在冲突')<html.indexOf('保留模型实际答复'));
+ assert.equal(h.turns[0].answer,'保留模型实际答复');
+});

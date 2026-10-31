@@ -51,16 +51,15 @@ frappe.SupplyHub = class {
         this.host.on('click', '[data-trace-demo]', async () => {
             if (this.busy || this.restoring) return;
             this.tracePreview = await this.call('scenario_preview');
+            this.tracePrioritySelection = null;
             this.renderMessages();
             const area = this.host.find('.hub-messages');
             area.scrollTop(area[0].scrollHeight);
             this.renderBusy();
         });
-        this.host.on('click', '[data-run-trace]', () => {
-            if (this.busy || this.restoring || !this.data?.model_ready) return;
-            this.tracePreview = null;
-            this.send('核查PO-1286供应延期：从原话和单据快照确认可用量、两张工单影响及待落实条件。不要重复计算销售与工单需求。', {scenario_id: 6});
-        });
+        this.host.on('click', '[data-run-trace]', () => this.runTracePreview());
+        this.host.on('click', '[data-priority-preview]', () => this.priorityDialog());
+        this.host.on('click', '[data-priority-review]', event => this.priorityDialog(event.currentTarget.dataset.priorityReview));
         this.host.on('click', '[data-scenario-update]', event => {
             this.send('供应商提前批从200改为120，请追查旧来源、受影响的候选方案与工单，只汇报变化和需要谁确认。',
                 {previous_turn: event.currentTarget.dataset.scenarioUpdate, scenario_update: 'supplier_120'});
@@ -229,19 +228,90 @@ frappe.SupplyHub = class {
         const plain = String(value || '').replace(/!?(\[([^\]]+)\])\([^)]*\)/g, '$2').replace(/^[\s]*#{1,6}\s*/gm, '').replace(/[*`>|]/g, '').replace(/\n{3,}/g, '\n\n').trim();
         return plain.length > limit ? plain.slice(0,limit).trim() + '…' : plain;
     }
-    scenarioBrief(snapshot, key) {
+    async runTracePreview() {
+        if (this.busy || this.restoring || !this.data?.model_ready || !this.tracePreview) return;
+        const selection = this.tracePrioritySelection;
+        const args = {scenario_id: 6, ...(selection ? {priority_order: JSON.stringify(selection.order), priority_reason: selection.reason} : {})};
+        await this.send('核查PO-1286供应延期：按本次优先级核对可用量、两张工单影响和待落实条件；不要重复计算销售与工单需求。', args);
+    }
+    priorityDialog(turnName = '') {
+        if (this.busy || this.restoring) return;
+        const turn = turnName ? this.turns.find(row => row.name === turnName) : null;
+        const snapshot = turn ? turn.verified_evidence : this.tracePreview;
+        if (snapshot?.scenario_key !== 'connector-1286' || (turnName && turn?.state !== 'done')) return;
+        const policy = turn?.priority_policy || snapshot.priority_policy;
+        const selection = !turnName && this.tracePrioritySelection;
+        const first = (selection?.order || policy?.order || ['WO-A'])[0];
+        const choices = ['WO-A · 先保 A（240 件，09:00 需料）', 'WO-B · 先保 B（320 件，13:00 需料）'];
+        frappe.prompt([
+            {fieldname: 'first_order', fieldtype: 'Select', label: '本次先保哪张工单', options: choices, default: choices[first === 'WO-B' ? 1 : 0], reqd: 1},
+            {fieldname: 'reason', fieldtype: 'Small Text', label: '指定理由（必填，1–300 字）', description: '仅确定核算顺序，系统仍会检查库存、到料和审批条件；不等于分配或执行授权。', default: selection?.reason || (policy?.mode === 'manual' ? policy.reason : ''), reqd: 1}
+        ], async values => {
+            if (this.busy || this.restoring) return;
+            const reason = String(values.reason || '').trim();
+            if (!reason || reason.length > 300) return frappe.msgprint('请填写 1–300 字的优先级理由。');
+            if (!choices.includes(values.first_order)) return frappe.msgprint('请选择 A 或 B 工单。');
+            const order = values.first_order === choices[1] ? ['WO-B', 'WO-A'] : ['WO-A', 'WO-B'];
+            const args = {priority_order: JSON.stringify(order), priority_reason: reason};
+            if (turnName) {
+                await this.send('按我指定的工单优先级重新校验，说明可以分多少、哪些条件未落实，以及另一张工单受到什么影响。保留旧方案与原始来源。', {previous_turn: turnName, ...args});
+            } else {
+                const preview = await this.call('scenario_preview', args);
+                this.tracePreview = preview;
+                this.tracePrioritySelection = {order, reason};
+                this.renderMessages();
+                this.renderBusy();
+            }
+        }, turnName ? '调整优先级并复核' : '设置本次优先级', turnName ? '记录并重新核查' : '应用到本次预览');
+    }
+    priorityPanel(snapshot, key, turn = {}) {
+        const policy = turn.priority_policy || snapshot?.priority_policy;
+        const assessment = turn.priority_assessment || snapshot?.priority_assessment;
+        if (snapshot?.scenario_key !== 'connector-1286' || !policy || !assessment) return '';
+        const assessed = assessment.status === 'assessed';
+        const manual = policy.mode === 'manual';
+        const preview = key === 'preview' || policy.preview;
+        const order = (policy.order || []).map(id => this.esc(id)).join(' → ');
+        const number = value => typeof value === 'number' ? this.esc(value) : '—';
+        const rows = assessed ? assessment.allocations || [] : [];
+        const totals = assessment.totals || {};
+        const ranked = assessment.ranked_orders || [];
+        const rules = assessment.rules || [];
+        const kindLabels = {hard: '硬约束', hard_constraint: '硬约束', policy: '排序策略', strategy: '排序策略', soft: '策略条件', timing: '时间条件', quantity: '数量规则'};
+        return `<section class="hub-priority-panel"><div class="hub-section-heading"><h3>${manual ? '本次指定顺序' : '默认按需料时点'}</h3><span class="hub-proof-badge" data-status="pending">${manual ? '人工排序' : '非人工指定'} · 未授权执行</span></div><strong class="hub-priority-order">${order}</strong><p>${this.esc(policy.reason || '按需料时点先后排序，尚未设置人工优先级。')}</p><small>${preview ? '仅预览；开始讨论后，系统记录实际提交账号与时间。' : `记录账号：${this.esc(policy.recorded_by || '未提供')} · ${this.esc(policy.recorded_at || '未提供')} · 版本 ${this.esc(policy.version || '—')}`}</small>
+        <div class="hub-priority-check"><b>按本次排序的数量校验</b><p>${this.esc(assessment.summary)}</p>${assessment.basis ? `<small class="hub-priority-basis">${this.esc(assessment.basis)}</small>` : ''}${assessment.tradeoff ? `<p class="hub-priority-tradeoff">${this.esc(assessment.tradeoff)}</p>` : ''}</div>
+        <details data-audit-key="priority-${this.esc(key)}"><summary>程序约束核对 · ${assessed ? '分配、规则与条件' : '信息待核实，暂不显示分配'}</summary>
+        ${ranked.length ? `<p class="hub-priority-dates"><b>${assessed ? '本轮核算需求' : '历史需求记录 · 待核验'}</b><br>${ranked.map(row => `${this.esc(row.id)} / ${this.esc(row.sales_order)} · ${number(row.quantity)} 件 · ${this.esc(row.material_required_at)} 需料`).join('<br>')}</p>` : ''}
+        ${rows.length ? `<div class="hub-table-scroll"><table class="hub-priority-table"><thead><tr><th>工单 / 需求</th><th>仅确定可用量</th><th>条件全部落实后</th></tr></thead><tbody>${rows.map(row => `<tr><th><b>${this.esc(row.priority)}. ${this.esc(row.work_order)}</b><small>${this.esc(row.sales_order)} · 需求 ${number(row.required)}</small></th><td>可分 ${number(row.confirmed_allocated)}<small>缺 ${number(row.confirmed_gap)}</small></td><td>候选 ${number(row.conditional_allocated)}<small>缺 ${number(row.conditional_gap)}</small></td></tr>`).join('')}</tbody></table></div><p class="hub-table-note">确定供给 ${number(totals.confirmed_supply)} / 需求 ${number(totals.demand)}；确定缺口 ${number(totals.confirmed_gap)}。条件候选供给 ${number(totals.conditional_supply)}，条件缺口 ${number(totals.conditional_gap)}。数量覆盖不等于已按时齐料。</p>` : '<p class="hub-table-note">当前信息不足以输出可靠分配量，请先核实补充信息。</p>'}
+        ${(assessment.conditions || []).length ? `<div class="hub-plan-conditions"><b>必须落实的条件</b><ul>${assessment.conditions.map(condition => `<li>${this.esc(condition)}</li>`).join('')}</ul></div>` : ''}
+        ${rules.length ? `<details data-audit-key="priority-rules-${this.esc(key)}"><summary>查看 ${rules.length} 条核验规则及依据</summary><ul class="hub-priority-rules">${rules.map(rule => `<li><b>${this.esc(rule.label)}</b><span class="hub-proof-badge">${this.esc(kindLabels[rule.kind] || rule.kind || '核验规则')}</span><p>${this.esc(rule.description)}</p><small>${/^https?:\/\//i.test(String(rule.source_url || '')) ? `<a href="${this.esc(rule.source_url)}" target="_blank" rel="noopener noreferrer">${this.esc(rule.source_title || '查看依据')}</a>` : this.esc(rule.source_title || '场景规则')} · ${this.esc(rule.id)}</small></li>`).join('')}</ul></details>` : ''}
+        <p class="hub-table-note">只核算本次顺序的影响；不自动采购、不调整预留、不放行待检。</p></details></section>`;
+    }
+    decisionStatus(check) {
+        if (!check) return '';
+        const status = ['matched', 'mismatch', 'unverified'].includes(check.status) ? check.status : 'unverified';
+        const labels = {matched: '结构化字段一致 · 文字建议仍待复核', mismatch: '总控建议存在冲突 · 不能作为已核验方案', unverified: '总控建议尚未核验 · 请先复核'};
+        const summary = check.summary || check.reason || (status === 'matched' ? '本次结构化字段与程序测算一致。' : '尚不能确认总控建议与本次程序测算一致。');
+        const issues = Array.isArray(check.issues) ? check.issues : [];
+        return `<section class="hub-decision-check" data-status="${status}" role="status"><b>${labels[status]}</b><p>${this.esc(summary)}</p>${issues.length ? `<ul>${issues.map(issue => `<li>${this.esc(issue)}</li>`).join('')}</ul>` : ''}<small>仅核对排序、数量和执行状态等结构化字段；不认证模型自然语言，也不构成审批或执行授权。</small></section>`;
+    }
+    scenarioBrief(snapshot, key, turn = {}) {
         if (snapshot?.scenario_key !== 'connector-1286') return '';
         const c = snapshot.calculation || {}, change = snapshot.change, sources = snapshot.rich_sources || [];
         const plan = snapshot.plan;
+        const assessment = turn.priority_assessment || snapshot.priority_assessment;
+        const needsVerification = assessment?.status === 'needs_verification';
         const metrics = [['自由库存', c.free_stock], ['A＋B需求', c.gross_demand], ['确定量缺口', c.free_quantity_gap]];
-        return `<section class="hub-case-brief"><div class="hub-section-heading"><h3>PO-1286 · 连接器延期</h3><span class="hub-proof-badge">合成案例 ${this.esc(snapshot.snapshot_version)}</span></div><p>同一连接器，两张工单争料。预留与待检尚未放行，销售订单与对应工单只计一次。</p>${typeof c.free_stock === 'number' ? `<div class="hub-case-metrics">${metrics.map(([label,value]) => `<div><span>${this.esc(label)}</span><strong>${this.esc(value)}<small> 件</small></strong></div>`).join('')}</div>` : `<p>${this.esc(c.status)}</p>`}<small>人物、消息、单据均为演示设定；当前未接入外部企业聊天。</small></section>
-        ${change ? `<section class="hub-change-card"><header class="hub-section-heading"><h4>10:18 新消息改变了候选方案</h4><span class="hub-proof-badge" data-status="pending">待条件落实</span></header><strong>提前批 ${this.esc(change.from_quantity)} → ${this.esc(change.to_quantity)} 件</strong><p>${this.esc(change.impact)}</p><details data-audit-key="impact-${this.esc(key)}"><summary>为什么差 ${this.esc(c.conditional_quantity_gap)} 件？追查原话与方案</summary><p>旧候选：200 自由＋160 申请调整＋200 可能提前＝560<br>新候选：200＋160＋120＝480；需求 560，差 80。若优先给 A 240，B 仅有候选 240，未满 320。</p><p>${this.esc(change.affected_plan)} → ${this.esc(change.updated_plan)} · ${this.esc(change.affected_records.join(' / '))}</p>${sources.filter(row => [change.old_source_id, change.new_source_id].includes(row.id)).map(row => this.sourceCard(row)).join('')}<p>${this.esc(change.unchanged_constraints)}</p><small>实际加载账号：${this.esc(change.recorded_by || '未录入')} · ${this.esc(change.recorded_at || '预览')}</small></details></section>` : ''}
-        <div class="hub-evidence-feed"><details data-audit-key="originals-${this.esc(key)}"><summary>原始消息与单据快照 · ${sources.length} 条演示证据</summary>${sources.slice().sort((a,b) => String(a.at).localeCompare(String(b.at))).map(row => this.sourceCard(row)).join('')}</details></div>
-        ${plan ? `<details class="hub-plan-conditions" data-audit-key="conditions-${this.esc(key)}"><summary>候选方案与 ${plan.conditions.length} 项未落实条件</summary><p>${this.esc(plan.id)} · ${this.esc(plan.status)}</p><p>候选数量 ${this.esc(c.conditional_supply)} 件；条件缺口 ${this.esc(c.conditional_quantity_gap)} 件。未确认提前批计入确定可用量：0 件。</p><ul>${plan.conditions.map(row => `<li><b>${this.esc(row.label)} · ${this.esc(row.status)}</b><br>${this.esc(row.requirement)}<small>${this.esc(row.owner)} · ${this.esc(row.source_ids.join(' / '))}</small></li>`).join('')}</ul></details>` : ''}`;
+        const historyPlan = plan ? `<details class="hub-plan-conditions" data-audit-key="conditions-${this.esc(key)}"><summary>${assessment ? '历史基线候选方案（非本次排序结果）' : `候选方案与 ${plan.conditions.length} 项未落实条件`}</summary><p>${this.esc(plan.id)} · ${this.esc(plan.status)}</p><p>候选数量 ${this.esc(c.conditional_supply)} 件；条件缺口 ${this.esc(c.conditional_quantity_gap)} 件。未确认提前批计入确定可用量：0 件。</p><ul>${plan.conditions.map(row => `<li><b>${this.esc(row.label)} · ${this.esc(row.status)}</b><br>${this.esc(row.requirement)}<small>${this.esc(row.owner)} · ${this.esc(row.source_ids.join(' / '))}</small></li>`).join('')}</ul></details>` : '';
+        return `<section class="hub-case-brief"><div class="hub-section-heading"><h3>PO-1286 · 连接器延期</h3><span class="hub-proof-badge">合成案例 ${this.esc(snapshot.snapshot_version)}</span></div><p>同一连接器，两张工单争料。预留与待检尚未放行，销售订单与对应工单只计一次。</p>${!needsVerification && typeof c.free_stock === 'number' ? `<div class="hub-case-metrics">${metrics.map(([label,value]) => `<div><span>${this.esc(label)}</span><strong>${this.esc(value)}<small> 件</small></strong></div>`).join('')}</div>` : `<p>${this.esc(needsVerification ? assessment.basis || '历史需求待核验，暂不显示原数值结论。' : c.status)}</p>`}<small>人物、消息、单据均为演示设定；当前未接入外部企业聊天。</small></section>
+        ${change ? `<section class="hub-change-card"><header class="hub-section-heading"><h4>10:18 提前批数量更新</h4><span class="hub-proof-badge" data-status="pending">待条件落实</span></header><strong>提前批 ${this.esc(change.from_quantity)} → ${this.esc(change.to_quantity)} 件</strong><p>${assessment ? '候选供给减少；具体影响哪张工单，见下方本次排序的数量校验。到仓和可用时间仍待确认。' : this.esc(change.impact)}</p><details data-audit-key="impact-${this.esc(key)}"><summary>追查新旧原话与历史候选方案</summary>${assessment ? '<p>以下为原始场景的历史基线，不能替代本次排序结果。</p>' : ''}<p>旧候选：200 自由＋160 申请调整＋200 可能提前＝560<br>新候选：200＋160＋120＝480；需求 560，差 80。历史基线先分给 A 时，B 尚缺 80；本次实际排序以上下文设置为准。</p><p>${this.esc(change.affected_plan)} → ${this.esc(change.updated_plan)} · ${this.esc(change.affected_records.join(' / '))}</p>${sources.filter(row => [change.old_source_id, change.new_source_id].includes(row.id)).map(row => this.sourceCard(row)).join('')}<p>${this.esc(change.unchanged_constraints)}</p><small>实际加载账号：${this.esc(change.recorded_by || '未录入')} · ${this.esc(change.recorded_at || '预览')}</small></details></section>` : ''}
+        ${this.priorityPanel(snapshot, key, turn)}
+        <div class="hub-evidence-feed"><details data-audit-key="originals-${this.esc(key)}"><summary>原始消息与单据快照 · ${sources.length} 条演示证据</summary>${sources.slice().sort((a,b) => String(a.at).localeCompare(String(b.at))).map(row => this.sourceCard(row)).join('')}</details></div>${historyPlan}`;
     }
-    scenarioActions(snapshot, key) {
+    scenarioActions(snapshot, key, turn = {}) {
         if (!snapshot?.plan?.tasks) return '';
-        return `<details class="hub-action-list" data-audit-key="actions-${this.esc(key)}"><summary>待办建议 · ${snapshot.plan.tasks.length} 项，尚未派发</summary><ol>${snapshot.plan.tasks.map(row => `<li>${this.esc(row.action)}<small>${this.esc(row.owner)} · ${this.esc(row.status)} · ${this.esc((row.suggested_due_at || row.expected_response_at).slice(5,16).replace('T',' '))}<br>${this.esc(row.time_basis)} · 依据 ${this.esc(row.source_ids.join(' / '))}</small></li>`).join('')}</ol></details>`;
+        const assessment = turn.priority_assessment || snapshot.priority_assessment;
+        return `<details class="hub-action-list" data-audit-key="actions-${this.esc(key)}"><summary>${assessment ? '历史候选待办（参考）' : '待办建议'} · ${snapshot.plan.tasks.length} 项，尚未派发</summary><ol>${snapshot.plan.tasks.map(row => `<li>${this.esc(row.action)}<small>${this.esc(row.owner)} · ${this.esc(row.status)} · ${this.esc((row.suggested_due_at || row.expected_response_at).slice(5,16).replace('T',' '))}<br>${this.esc(row.time_basis)} · 依据 ${this.esc(row.source_ids.join(' / '))}</small></li>`).join('')}</ol></details>`;
     }
     recordSource(event) {
         if (!event.result_excerpt || event.truncated) return '';
@@ -304,15 +374,17 @@ frappe.SupplyHub = class {
             const timing = turn.timing ? ` · ${(turn.timing.total_ms / 1000).toFixed(1)}秒 · ${turn.timing.model_calls}次模型请求` : '';
             const snapshot = turn.verified_evidence;
             const audit = turn.events?.length ? this.auditTrail(turn) : (turn.discussion || []).map((row,i) => `<details data-audit-key="legacy-${this.esc(turn.name)}-${i}"><summary>${this.esc(this.names[row.module])} · ${this.esc(row.phase)} · 待核实</summary><div class="hub-markdown">${this.answer(row.answer)}</div></details>`).join('');
-            return `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><div class="hub-run-head"><b>${turn.synthetic ? '合成场景 · 真实协作' : this.esc(this.names[turn.agent_module] || '总控') + ' Agent'}</b><span>${completed ? '本轮结束' : '正在协同'}${replies ? ' · ' + replies + '/10项反馈' : ''}</span></div>${this.scenarioBrief(snapshot,turn.name)}
-            <div class="hub-outcome"><b>${completed ? '当前结论与下一步' : '正在核查'}</b><small>${this.esc(timing)}</small><p>${this.esc(this.plainSummary(summary))}</p>${summary.length > 220 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(summary)}</div></details>` : ''}</div>
-            ${completed && audit ? `<details data-audit-key="process-${this.esc(turn.name)}"><summary>查看部门协作过程 · ${turn.events?.length || replies} 条留痕</summary>${audit}</details>` : audit}${this.scenarioActions(snapshot,turn.name)}
+            return `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><div class="hub-run-head"><b>${turn.synthetic ? '合成场景 · 真实协作' : this.esc(this.names[turn.agent_module] || '总控') + ' Agent'}</b><span>${completed ? '本轮结束' : '正在协同'}${replies ? ' · ' + replies + '/10项反馈' : ''}</span></div>${this.scenarioBrief(snapshot,turn.name,turn)}
+            ${this.decisionStatus(turn.decision_check)}
+            <div class="hub-outcome"><b>${completed ? ((turn.priority_assessment || snapshot?.priority_assessment) ? '总控建议（待复核）' : '当前结论与下一步') : '正在核查'}</b><small>${this.esc(timing)}</small><p>${this.esc(this.plainSummary(summary))}</p>${summary.length > 220 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(summary)}</div></details>` : ''}</div>
+            ${completed && audit ? `<details data-audit-key="process-${this.esc(turn.name)}"><summary>查看部门协作过程 · ${turn.events?.length || replies} 条留痕</summary>${audit}</details>` : audit}${this.scenarioActions(snapshot,turn.name,turn)}
             ${turn.synthetic ? '<p class="hub-table-note">模型反馈待核实；不自动采购、不释放预留。来源没有提供人时明确留空。</p>' : ''}
             ${snapshot?.scenario_key === 'connector-1286' && !snapshot.updated && !snapshot.human_sources?.length && turn.state === 'done' ? `<button type="button" data-scenario-update="${this.esc(turn.name)}">加载10:18演示新消息：200 → 120</button>` : ''}
+            ${snapshot?.scenario_key === 'connector-1286' && turn.state === 'done' ? `<button type="button" data-priority-review="${this.esc(turn.name)}">调整优先级并复核</button>` : ''}
             ${turn.synthetic && turn.state === 'done' ? `<button type="button" data-add-evidence="${this.esc(turn.name)}">补充信息并复核</button>` : ''}
             ${(turn.documents || []).map(doc => `<button type="button" class="hub-draft" data-doctype="${this.esc(doc.doctype)}" data-docname="${this.esc(doc.name)}">打开物料需求单 ${this.esc(doc.name)} ↗</button>`).join('')}${turn.documents?.length ? '<p class="hub-table-note">已登记物料需求单。请打开核对当前状态；草稿提交后进入询价、比价和采购审批。</p>' : ''}${(turn.offers || []).map((offer,index) => `<button type="button" class="hub-draft" data-draft="${this.esc(turn.name)}" data-index="${index}">${this.esc(offer.label)} ↗</button>`).join('')}${turn.offers?.length ? '<p class="hub-table-note">打开未保存草稿，仍需核对、审批。</p>' : ''}</article>`;
         }).join('') : `<div class="hub-empty"><h2>${this.module === 'control' ? '查看模块上报，协调下一步' : this.names[this.module] + '有哪些问题需要处理？'}</h2></div>`;
-        if (this.tracePreview) markup += `<article class="hub-message hub-assistant">${this.scenarioBrief(this.tracePreview,'preview')}<button type="button" class="hub-new" data-run-trace>开始四部门核查</button><p class="hub-table-note">读取以上演示证据调用真实模型；核查后可加载新消息，查看方案如何变化。</p></article>`;
+        if (this.tracePreview) markup += `<article class="hub-message hub-assistant">${this.scenarioBrief(this.tracePreview,'preview')}<button type="button" data-priority-preview>设置本次优先级</button><button type="button" class="hub-new" data-run-trace>开始四部门核查</button><p class="hub-table-note">读取以上演示证据调用真实模型；核查后可加载新消息，查看方案如何变化。</p></article>`;
         if (this.messageMarkup === markup) return;
         messages.html(markup); this.messageMarkup = markup;
         node.querySelectorAll?.('details').forEach(el => {if (opened.has(el.dataset.auditKey)) el.open = true;});
@@ -321,8 +393,8 @@ frappe.SupplyHub = class {
     renderBusy() {
         this.host.find('.hub-send').prop('disabled', this.restoring || this.busy || !this.data?.model_ready).text(this.busy ? '分析中…' : '发送 ↑');
         this.host.find('.hub-new').prop('disabled', this.restoring || this.busy);
-        this.host.find('[data-prompt], [data-live-discussion], [data-run-trace], [data-scenario-update], [data-add-evidence]').prop('disabled', this.restoring || this.busy || !this.data?.model_ready);
-        this.host.find('[data-trace-demo]').prop('disabled', this.restoring || this.busy);
+        this.host.find('[data-prompt], [data-live-discussion], [data-run-trace], [data-scenario-update], [data-add-evidence], [data-priority-review]').prop('disabled', this.restoring || this.busy || !this.data?.model_ready);
+        this.host.find('[data-trace-demo], [data-priority-preview]').prop('disabled', this.restoring || this.busy);
     }
     async send(prompt, scenario = {}) {
         const draft = this.host.find('textarea').val();
@@ -337,6 +409,7 @@ frappe.SupplyHub = class {
             const response = await this.call('start', {question, module, conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario});
             const turn = {...response, question, agent_module: module, state: 'queued'};
             this.turns.push(turn);
+            if (scenario.scenario_id === 6) { this.tracePreview = null; this.tracePrioritySelection = null; }
             if (this.host[0]?.isConnected) this.refreshActivity();
             if (typeof prompt !== 'string' && this.host.find('textarea').val() === draft) this.host.find('textarea').val('');
             this.renderMessages();

@@ -218,10 +218,15 @@ class DiscussionTests(unittest.TestCase):
                 def provider(system, messages, tools):
                     return {'content': [{'type': 'text', 'text': wrong_model_answer}], 'stop_reason': 'end_turn'}
                 result = discuss(snapshot, '分析连接器缺料', lambda rows: None, provider)
-                self.assertEqual(result['answer'], snapshot['deterministic_conclusion'])
-                self.assertNotIn(wrong_model_answer, result['answer'])
+                self.assertNotEqual(result['answer'], snapshot['deterministic_conclusion'])
+                self.assertIn(wrong_model_answer, result['answer'])
                 self.assertEqual(result['discussion'][-1]['answer'], wrong_model_answer)
-                self.assertIn('确定可用量还缺 360 件', result['answer'])
+                assessment = result['priority_assessment']
+                self.assertEqual(assessment['totals']['confirmed_gap'], 360)
+                self.assertEqual(assessment['totals']['conditional_gap'], conditional_gap)
+                self.assertEqual(assessment['totals']['conditional_supply'], candidate_total)
+                self.assertFalse(assessment['execution_authorized'])
+                self.assertEqual(result['decision_check']['status'], 'unverified')
                 calculation = result['verified_evidence']['calculation']
                 self.assertEqual(calculation['free_quantity_gap'], 360)
                 self.assertEqual(calculation['early_confirmed_usable_quantity'], 0)
@@ -231,12 +236,65 @@ class DiscussionTests(unittest.TestCase):
                 self.assertFalse(result['verified_evidence']['plan']['execution_authorized'])
                 self.assertTrue(result['review_required'])
                 if updated:
-                    self.assertIn('较需求缺 80', result['answer'])
-                    self.assertIn('B 仅有候选 240，仍缺 80', result['answer'])
+                    self.assertEqual(assessment['allocations'][1]['conditional_gap'], 80)
                     self.assertEqual(result['verified_evidence']['plan']['supersedes'], 'PLAN-1286-v1')
                 else:
-                    self.assertIn('仅数量配平，时间与审批尚未落实', result['answer'])
-                    self.assertNotIn('缺 80', result['answer'])
+                    self.assertEqual(assessment['allocations'][1]['conditional_gap'], 0)
+
+    def test_manual_b_first_reaches_every_phase_and_single_source_read(self):
+        from suke_ops.priority_policy import make_policy
+        snapshot = evidence(6, True)
+        policy = make_policy(snapshot, ['WO-B', 'WO-A'], '本次先保B，确认A影响',
+                             'buyer@example.invalid', '2026-11-02T10:30:00+08:00')
+        payloads, states = [], []
+        def provider(system, messages, tools):
+            if isinstance(messages[-1]['content'], str):
+                payloads.append(json.loads(messages[-1]['content'].split('\n', 1)[1]))
+                return {'content': [{'type': 'tool_use', 'id': 'source', 'name': 'read_evidence',
+                                     'input': {'evidence_id': 'E11'}}]}
+            payloads.append(json.loads(messages[-1]['content'][0]['content']))
+            return {'content': [{'type': 'text', 'text': '本轮先保B；A条件量缺80，提前批须09:00前可用。'}], 'stop_reason': 'end_turn'}
+        result = discuss(snapshot, '本次先保B', lambda rows: None, provider,
+                         on_event=states.append, priority_policy=policy)
+        self.assertEqual(len(payloads), 20)
+        for payload in payloads:
+            self.assertEqual(payload['evidence']['priority_policy'], policy)
+            allocations = payload['evidence']['priority_assessment']['allocations']
+            self.assertEqual([row['work_order'] for row in allocations], ['WO-B', 'WO-A'])
+            self.assertEqual([row['conditional_allocated'] for row in allocations], [320, 160])
+            self.assertNotIn('plan', payload['evidence'])
+            self.assertNotIn('deterministic_conclusion', payload['evidence'])
+        self.assertTrue(all(state['priority_policy'] == policy for state in states))
+        self.assertEqual([row['phase'] for row in result['discussion']],
+                         ['部门初核'] * 4 + ['总控追问'] + ['部门复核'] * 4 + ['处置建议'])
+        self.assertIn('本轮先保B', result['answer'])
+        self.assertEqual(result['verified_evidence'], snapshot)
+
+    def test_final_structured_fields_are_checked_without_extra_model_round(self):
+        from suke_ops.priority_policy import make_policy
+        snapshot = evidence(6, True)
+        policy = make_policy(snapshot, ['WO-B', 'WO-A'], '先核对B的保供条件',
+                             'buyer@example.invalid', '2026-11-02T10:30:00+08:00')
+        calls = []
+        def provider(system, messages, tools):
+            payload = json.loads(messages[-1]['content'].split('\n', 1)[1])
+            calls.append(payload)
+            answer = '核查本部门信息，条件未落实。'
+            if len(payload['discussion']) == 9:
+                check = payload['evidence']['priority_assessment']
+                answer = json.dumps({'policy_version': policy['version'], 'order': policy['order'],
+                    'confirmed_gap': check['totals']['confirmed_gap'],
+                    'conditional_gap': check['totals']['conditional_gap'],
+                    'allocations': [{key: row[key] for key in ('work_order', 'required', 'confirmed_allocated',
+                        'confirmed_gap', 'conditional_allocated', 'conditional_gap')} for row in check['allocations']],
+                    'execution_authorized': False, 'summary': 'B先保，但仍待预留审批；A候选量缺80，提前批须09:00前可用。'}, ensure_ascii=False)
+            return {'content': [{'type': 'text', 'text': answer}], 'stop_reason': 'end_turn'}
+        result = discuss(snapshot, '先保B', lambda rows: None, provider, priority_policy=policy)
+        self.assertEqual(len(calls), 10)
+        self.assertEqual(result['decision_check']['status'], 'matched')
+        self.assertIn('B先保', result['answer'])
+        self.assertNotIn('policy_version', result['answer'])
+        self.assertIn('policy_version', result['discussion'][-1]['raw_answer'])
 
     def test_rich_model_projection_removes_duplicate_text_but_preserves_audit_snapshot(self):
         for updated in (False, True):
@@ -256,8 +314,11 @@ class DiscussionTests(unittest.TestCase):
                 self.assertNotIn('rich_sources', initial['evidence'])
                 self.assertNotIn('human_sources', initial['evidence'])
                 self.assertNotIn('facts', initial['evidence'])
-                for key in ('calculation', 'plan', 'change', 'as_of', 'snapshot_version', 'evidence_precedence', 'boundary'):
+                for key in ('as_of', 'snapshot_version', 'boundary'):
                     self.assertEqual(initial['evidence'][key], original[key])
+                for key in ('plan', 'change', 'deterministic_conclusion'):
+                    self.assertNotIn(key, initial['evidence'])
+                self.assertEqual(initial['evidence']['priority_assessment'], result['priority_assessment'])
                 model_sources = {row['id']: row for row in initial['sources']}
                 for row in original['rich_sources']:
                     actual = model_sources[row['id']]
@@ -272,7 +333,7 @@ class DiscussionTests(unittest.TestCase):
                 old_payload = {'evidence': original, 'sources': source_records(original), 'discussion': []}
                 old_size = len(json.dumps(old_payload, ensure_ascii=False).encode())
                 new_size = len(json.dumps(initial, ensure_ascii=False).encode())
-                self.assertLess(new_size, old_size * 0.65)
+                self.assertLess(new_size, old_size)  # Includes the new active policy and constraints.
                 final_payload = next(payload for payload in payloads if len(payload['discussion']) == 9)
                 for row in final_payload['discussion']:
                     self.assertIn('answer', row)

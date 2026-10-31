@@ -288,14 +288,17 @@ def owned_turn(name):
 
 
 @frappe.whitelist(methods=['POST'])
-def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, scenario_update=None):
+def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, scenario_update=None, priority_order=None, priority_reason=None):
     require_user()
     check_module(module, control=True)
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
         frappe.throw('请输入 1–2000 字的问题。')
     if not runtime.configured():
         frappe.throw('尚未配置模型服务；面板和手动功能仍可使用。')
-    scenario = None
+    scenario, inherited_policy = None, None
+    manual_priority = priority_order is not None or priority_reason is not None
+    if manual_priority and (human_note or scenario_update):
+        frappe.throw('请将优先级调整与证据补充分开复核，以保留各自依据。')
     if scenario_id is not None:
         from suke_ops.live_discussion import evidence
         if module != 'control':
@@ -309,7 +312,9 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         prior = owned_turn(previous_turn)
         if prior.state != 'done' or module != 'control':
             frappe.throw('请等待原讨论结束后补充信息。')
-        scenario = json.loads(prior.result or '{}').get('verified_evidence')
+        prior_result = json.loads(prior.result or '{}')
+        scenario = prior_result.get('verified_evidence')
+        inherited_policy = prior_result.get('priority_policy')
         if not scenario or not scenario.get('synthetic'):
             frappe.throw('此入口仅用于合成场景复核。')
         if scenario_update:
@@ -318,6 +323,8 @@ def start(question, module='control', conversation=None, request_id=None, scenar
                 scenario = apply_update(scenario, scenario_update, prior.name, frappe.session.user, str(now_datetime()))
             except ValueError as exc:
                 frappe.throw(str(exc))
+        elif manual_priority:
+            pass  # Changing preference does not change source evidence or approve stock use.
         elif not isinstance(human_note, str) or not human_note.strip() or len(human_note) > 1000:
             frappe.throw('请输入1–1000字补充信息。')
         else:
@@ -339,6 +346,13 @@ def start(question, module='control', conversation=None, request_id=None, scenar
             scenario['evidence_precedence'] = '原证据为历史基线；人员补充尚未核实，不自动覆盖原约束，不直接执行。'
     elif scenario_update:
         frappe.throw('请从原讨论加载变更，以保留版本关联。')
+    priority_state = {}
+    if manual_priority and (not scenario or scenario.get('scenario_key') != 'connector-1286'):
+        frappe.throw('订单优先级设置目前仅支持连接器演示案例。')
+    if scenario and scenario.get('scenario_key') == 'connector-1286':
+        priority_state = scenario_priority(scenario, priority_order, priority_reason, inherited_policy)
+    if previous_turn:
+        priority_state['previous_turn'] = previous_turn
     conversation = str(uuid.UUID(conversation)) if conversation else str(uuid.uuid4())
     request_id = str(uuid.UUID(request_id)) if request_id else str(uuid.uuid4())
     key = hashlib.sha256((frappe.session.user + ':' + request_id).encode()).hexdigest()
@@ -356,18 +370,47 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         frappe.db.set_value('Agent Turn', row.name, {'state': 'failed', 'answer': '分析超时，请重新发送。'})
     doc = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation, 'request_key': key,
                          'agent_module': module, 'question': question.strip(), 'state': 'queued',
-                         'result': json.dumps({'scenario': scenario}, ensure_ascii=False) if scenario else None}).insert(ignore_permissions=True)
+                         'result': json.dumps({'scenario': scenario, **priority_state}, ensure_ascii=False) if scenario else None}).insert(ignore_permissions=True)
     frappe.enqueue('suke_ops.hub.run_turn', queue='long', timeout=900, enqueue_after_commit=True,
                    job_id='agent-' + doc.name, name=doc.name)
     return {'name': doc.name, 'conversation': conversation, 'synthetic': bool(scenario),
-            **({'verified_evidence': scenario} if scenario else {})}
+            **({'verified_evidence': scenario, **priority_state} if scenario else {})}
+
+
+def scenario_priority(snapshot, priority_order=None, priority_reason=None, inherited=None):
+    """Keep decision preference separate from immutable evidence and caller identity."""
+    from suke_ops.priority_policy import make_policy, assess
+    try:
+        if priority_order is not None or priority_reason is not None:
+            if isinstance(priority_order, str):
+                if len(priority_order) > 2000:
+                    raise ValueError('排序参数过长。')
+                try:
+                    priority_order = json.loads(priority_order)
+                except (TypeError, ValueError):
+                    raise ValueError('排序参数不是有效列表。') from None
+            if not isinstance(priority_order, list):
+                raise ValueError('请提供完整订单顺序及调整理由。')
+            policy = make_policy(snapshot, priority_order, priority_reason,
+                                 frappe.session.user, str(now_datetime()))
+        elif inherited:
+            policy = inherited
+        else:
+            policy = make_policy(snapshot, recorded_by=frappe.session.user,
+                                 recorded_at=str(now_datetime()))
+        return {'priority_policy': policy, 'priority_assessment': assess(snapshot, policy)}
+    except ValueError as exc:
+        frappe.throw(str(exc))
 
 
 @frappe.whitelist()
-def scenario_preview():
+def scenario_preview(priority_order=None, priority_reason=None):
     require_user()
     from suke_ops.trace_scenario import evidence
-    return evidence(False)
+    snapshot = evidence(False)
+    state = scenario_priority(snapshot, priority_order, priority_reason)
+    state['priority_policy'] = {**state['priority_policy'], 'preview': True}
+    return {**snapshot, **state}
 
 
 @frappe.whitelist()
@@ -496,9 +539,14 @@ def run_turn(name):
             from suke_ops.live_discussion import discuss
             def publish_event(state):
                 state['mode'] = '真实模型讨论 / 合成证据 / 不执行'
+                if stored.get('previous_turn'):
+                    state['previous_turn'] = stored['previous_turn']
                 frappe.db.set_value('Agent Turn', name, 'result', json.dumps(state, ensure_ascii=False))
                 frappe.db.commit()
-            result = discuss(stored['scenario'], turn.question, lambda rows: None, on_event=publish_event)
+            result = discuss(stored['scenario'], turn.question, lambda rows: None, on_event=publish_event,
+                             priority_policy=stored.get('priority_policy'))
+            if stored.get('previous_turn'):
+                result['previous_turn'] = stored['previous_turn']
             frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': result['answer'],
                                 'result': json.dumps(result, ensure_ascii=False)})
             frappe.db.commit()
