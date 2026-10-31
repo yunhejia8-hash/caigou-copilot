@@ -87,7 +87,8 @@ test('采购请求转交采购模块，并携带用户追问上下文', async ()
     await chat({...request('交期呢'), history: [{role: 'user', content: '查采购订单 PO-DEMO'}]});
     const start = calls.find(x => x.method.endsWith('.start'));
     assert.equal(start.args.module, 'buying');
-    assert.match(start.args.question, /PO-DEMO/);
+    assert.equal(start.args.question,'交期呢');
+    assert.match(start.args.handoff_context,/PO-DEMO/);
 });
 test('路由请求取消时不创建业务任务', async () => {
     const controller = new AbortController();
@@ -106,7 +107,7 @@ test('跨模块追问保留助手提到的单号和物料，并明确须重新�
     await chat({...request('它的库存够吗'), history: [{role: 'user', content: '哪个采购单延期最严重'}, {role: 'assistant', content: 'PO-123 对应 ITEM-A'}]});
     const start = calls.find(x => x.method.endsWith('.start'));
     assert.equal(start.args.module, 'stock');
-    assert.match(start.args.question, /ITEM-A/);
-    assert.match(start.args.question, /必须重新核实/);
-    assert.ok(start.args.question.startsWith('它的库存够吗'));
+    assert.equal(start.args.question,'它的库存够吗');
+    assert.match(start.args.handoff_context,/ITEM-A/);
+    assert.equal(JSON.parse(start.args.handoff_context)[1].role,'assistant');
 });

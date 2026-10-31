@@ -6,7 +6,7 @@ app_email = 'demo@example.invalid'
 app_license = 'MIT'
 app_include_js = ['/assets/suke_ops/ops.js', '/assets/suke_ops/business_search.js?v=click-only-20261031-2',
                   '/assets/suke_ops/bear-pet.js', '/assets/suke_ops/bear-control.js']
-app_include_css = ['/assets/suke_ops/business_search.css']
+app_include_css = ['/assets/suke_ops/business_search.css', '/assets/suke_ops/gold-theme.css']
 awesomebar_search = ['suke_ops.business_search.awesomebar']
 doc_events = {'Supply Decision': {'validate': 'suke_ops.api.validate_decision'},
               'Operations Approval': {'validate': 'suke_ops.approval.validate'},

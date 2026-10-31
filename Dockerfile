@@ -1,6 +1,7 @@
 # 构建阶段复用固定版本运行环境；最终镜像从空层复制，不能从旧层取回完整 ERPNext 源码。
 FROM frappe/erpnext:v16.53.0 AS prepared
 USER root
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
 RUN rm -rf /home/frappe/frappe-bench/apps/erpnext /home/frappe/frappe-bench/assets/erpnext
 COPY --chown=frappe:frappe apps/erpnext /home/frappe/frappe-bench/apps/erpnext
 COPY --chown=frappe:frappe apps/suke_ops /home/frappe/frappe-bench/apps/suke_ops

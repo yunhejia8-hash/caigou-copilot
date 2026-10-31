@@ -209,7 +209,7 @@ def dashboard(module='control', view='chat'):
 @frappe.whitelist()
 def chat_status():
     require_user()
-    return {'model_ready': runtime.configured()}
+    return {'model_ready': runtime.configured(), 'client_version': 'procurement-approval-v1'}
 
 
 def install():
@@ -235,41 +235,86 @@ def owned_turn(name):
 
 
 @frappe.whitelist(methods=['POST'])
-def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, procurement_process=None, procurement_stage='order'):
+def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, scenario_update=None, priority_order=None, priority_reason=None, quote_image=None, client_version=None, procurement_process=None, procurement_stage='order', handoff_context=None):
     require_user()
     check_module(module, control=True)
+    from suke_ops.handoff import validate as validate_handoff
+    try:
+        handoff_context = validate_handoff(handoff_context)
+    except ValueError as error:
+        frappe.throw(str(error))
+    request = getattr(getattr(frappe, 'local', None), 'request', None)
+    if getattr(request, 'method', None) == 'POST' and client_version != 'procurement-approval-v1':
+        frappe.throw('工作台已更新，请刷新页面后再发送；本次未创建任务，输入内容已保留。')
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
         frappe.throw('请输入 1–2000 字的问题。')
     if not runtime.configured():
         frappe.throw('尚未配置模型服务；面板和手动功能仍可使用。')
-    scenario = None
+    if quote_image:
+        from suke_ops.procurement_images import validate_upload
+        from suke_ops.procurement_workflow import previous_workflow, guard
+        if module not in ('buying','buying-demand','buying-inquiry','buying-comparison'):
+            frappe.throw('请在采购询价对话中发送图片。')
+        guard(previous_workflow(conversation), 'procurement_search')
+        validate_upload(quote_image)
+    scenario, inherited_policy = None, None
+    manual_priority = priority_order is not None or priority_reason is not None
+    if manual_priority and (human_note or scenario_update):
+        frappe.throw('请将优先级调整与证据补充分开复核，以保留各自依据。')
     if scenario_id is not None:
         from suke_ops.live_discussion import evidence
         if module != 'control':
             frappe.throw('场景讨论仅支持总控。')
+        if previous_turn or scenario_update:
+            frappe.throw('新建场景与更新原讨论不能同时选择。')
+        if int(scenario_id) == 6 and scenario_updated in (True, 1, '1', 'true'):
+            frappe.throw('请先完成初始讨论，再加载10:18新消息，以保留版本关联。')
         scenario = evidence(int(scenario_id), scenario_updated in (True, 1, '1', 'true'))
     if previous_turn:
         prior = owned_turn(previous_turn)
         if prior.state != 'done' or module != 'control':
             frappe.throw('请等待原讨论结束后补充信息。')
-        scenario = json.loads(prior.result or '{}').get('verified_evidence')
+        prior_result = json.loads(prior.result or '{}')
+        scenario = prior_result.get('verified_evidence')
+        inherited_policy = prior_result.get('priority_policy')
         if not scenario or not scenario.get('synthetic'):
             frappe.throw('此入口仅用于合成场景复核。')
-        if not isinstance(human_note, str) or not human_note.strip() or len(human_note) > 1000:
+        if scenario_update:
+            from suke_ops.trace_scenario import apply_update
+            try:
+                scenario = apply_update(scenario, scenario_update, prior.name, frappe.session.user, str(now_datetime()))
+            except ValueError as exc:
+                frappe.throw(str(exc))
+        elif manual_priority:
+            pass  # Changing preference does not change source evidence or approve stock use.
+        elif not isinstance(human_note, str) or not human_note.strip() or len(human_note) > 1000:
             frappe.throw('请输入1–1000字补充信息。')
-        notes = scenario.setdefault('human_sources', [])
-        if len(notes) >= 10:
-            frappe.throw('本案例已达到10条补充上限，请整理后重新建案。')
-        note = human_note.strip()
-        notes.append({'id': 'H' + str(len(notes) + 1), 'label': '人员补充（待核实）',
+        else:
+            notes = scenario.setdefault('human_sources', [])
+            if len(notes) >= 10:
+                frappe.throw('本案例已达到10条补充上限，请整理后重新建案。')
+            note = human_note.strip()
+            notes.append({'id': 'H' + str(len(notes) + 1), 'label': '人员补充（待核实）',
                       'text': note, 'reported_by': frappe.session.user, 'reported_at': str(now_datetime()),
                       'source_type': '登录用户补充', 'source_path': prior.name,
                       'verification': '尚未核实，不代表供应商确认或审批通过',
                       'version': hashlib.sha256(note.encode()).hexdigest()[:12]})
-        scenario['previous_turn'] = prior.name
-        scenario['verified_plan'] = {}
-        scenario['calculation'] = {'status': '已有人员补充；旧计算已暂停，需重新核实输入。'}
-        scenario['evidence_precedence'] = '原证据为历史基线；人员补充尚未核实，不自动覆盖原约束，不直接执行。'
+            scenario['previous_turn'] = prior.name
+            scenario['verified_plan'] = {}
+            scenario.pop('deterministic_conclusion', None)
+            scenario.pop('plan', None)
+            scenario.pop('change', None)
+            scenario['calculation'] = {'status': '已有人员补充；旧计算已暂停，需重新核实输入。'}
+            scenario['evidence_precedence'] = '原证据为历史基线；人员补充尚未核实，不自动覆盖原约束，不直接执行。'
+    elif scenario_update:
+        frappe.throw('请从原讨论加载变更，以保留版本关联。')
+    priority_state = {}
+    if manual_priority and (not scenario or scenario.get('scenario_key') != 'connector-1286'):
+        frappe.throw('订单优先级设置目前仅支持连接器演示案例。')
+    if scenario and scenario.get('scenario_key') == 'connector-1286':
+        priority_state = scenario_priority(scenario, priority_order, priority_reason, inherited_policy)
+    if previous_turn:
+        priority_state['previous_turn'] = previous_turn
     procurement_context = None
     if procurement_process:
         from suke_ops.procurement_api import overview
@@ -295,10 +340,47 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         frappe.db.set_value('Agent Turn', row.name, {'state': 'failed', 'answer': '分析超时，请重新发送。'})
     doc = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation, 'request_key': key,
                          'agent_module': module, 'question': question.strip(), 'state': 'queued',
-                         'result': json.dumps({'scenario': scenario} if scenario else {'procurement_context': procurement_context}, ensure_ascii=False) if scenario or procurement_context else None}).insert(ignore_permissions=True)
+                         'result': json.dumps({'scenario': scenario, 'quote_image': quote_image, **priority_state, 'procurement_context': procurement_context, 'handoff_context': handoff_context}, ensure_ascii=False) if scenario or quote_image or procurement_context or handoff_context else None}).insert(ignore_permissions=True)
     frappe.enqueue('suke_ops.hub.run_turn', queue='long', timeout=900, enqueue_after_commit=True,
                    job_id='agent-' + doc.name, name=doc.name)
-    return {'name': doc.name, 'conversation': conversation}
+    return {'name': doc.name, 'conversation': conversation, 'synthetic': bool(scenario),
+            **({'verified_evidence': scenario, **priority_state} if scenario else {})}
+
+
+def scenario_priority(snapshot, priority_order=None, priority_reason=None, inherited=None):
+    """Keep decision preference separate from immutable evidence and caller identity."""
+    from suke_ops.priority_policy import make_policy, assess
+    try:
+        if priority_order is not None or priority_reason is not None:
+            if isinstance(priority_order, str):
+                if len(priority_order) > 2000:
+                    raise ValueError('排序参数过长。')
+                try:
+                    priority_order = json.loads(priority_order)
+                except (TypeError, ValueError):
+                    raise ValueError('排序参数不是有效列表。') from None
+            if not isinstance(priority_order, list):
+                raise ValueError('请提供完整订单顺序及调整理由。')
+            policy = make_policy(snapshot, priority_order, priority_reason,
+                                 frappe.session.user, str(now_datetime()))
+        elif inherited:
+            policy = inherited
+        else:
+            policy = make_policy(snapshot, recorded_by=frappe.session.user,
+                                 recorded_at=str(now_datetime()))
+        return {'priority_policy': policy, 'priority_assessment': assess(snapshot, policy)}
+    except ValueError as exc:
+        frappe.throw(str(exc))
+
+
+@frappe.whitelist()
+def scenario_preview(priority_order=None, priority_reason=None):
+    require_user()
+    from suke_ops.trace_scenario import evidence
+    snapshot = evidence(False)
+    state = scenario_priority(snapshot, priority_order, priority_reason)
+    state['priority_policy'] = {**state['priority_policy'], 'preview': True}
+    return {**snapshot, **state}
 
 
 @frappe.whitelist()
@@ -391,6 +473,10 @@ def module_tools(module):
                            {'doctype': runtime.text_schema(AGENT_DOCS[module] + SHARED_DOCS), 'name': runtime.text_schema()}, ['doctype', 'name']),
             runtime.schema('compare_supply_case', '调用程序计算现存、锁定、待确认供货及销售/生产两方案',
                            {'name': runtime.text_schema()}, ['name'])]
+    if module in ('buying','buying-demand','buying-inquiry','buying-comparison'):
+        specs += [runtime.schema('procurement_intake', '调用用户procurement-agent仓库的需求提取和字段校验，直接读取本人的会话原文；缺失项在原对话追问，不创建单据', {}),
+                  runtime.schema('procurement_compare', '调用用户仓库的报价提取、规格单位税运交期核对和到仓金额比较；直接读取本人最近报价原文，无需模型传入数字。无综合评分。', {}),
+                  runtime.schema('procurement_search', '用户要求联网询价时调用原仓库搜索服务，只发送物料规格数量单位并返回来源；不发送姓名预算，不作供应商承诺', {})]
     if module == 'buying':
         specs.append(runtime.schema('read_procurement_progress', '读取采购六环节的进度和专项Agent最新汇报', {}))
     actions = [key for key in DRAFTS if module in draft_modules(key)]
@@ -430,18 +516,33 @@ def run_turn(name):
             from suke_ops.live_discussion import discuss
             def publish_event(state):
                 state['mode'] = '真实模型讨论 / 合成证据 / 不执行'
+                if stored.get('previous_turn'):
+                    state['previous_turn'] = stored['previous_turn']
                 frappe.db.set_value('Agent Turn', name, 'result', json.dumps(state, ensure_ascii=False))
                 frappe.db.commit()
-            result = discuss(stored['scenario'], turn.question, lambda rows: None, on_event=publish_event)
+            result = discuss(stored['scenario'], turn.question, lambda rows: None, on_event=publish_event,
+                             priority_policy=stored.get('priority_policy'))
+            if stored.get('previous_turn'):
+                result['previous_turn'] = stored['previous_turn']
             frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': result['answer'],
                                 'result': json.dumps(result, ensure_ascii=False)})
             frappe.db.commit()
             return
+        if turn.agent_module in ('buying','buying-demand','buying-inquiry','buying-comparison') and not stored.get('procurement_context'):
+            from suke_ops.procurement_workflow import process
+            workflow_result = process(turn)
+            if workflow_result is not None:
+                frappe.db.set_value('Agent Turn',name,{'state':'done','answer':workflow_result['answer'],
+                                    'result':json.dumps(workflow_result,ensure_ascii=False,default=str)})
+                frappe.db.commit()
+                return
         previous = frappe.get_all('Agent Turn', filters={'owner': turn.owner, 'conversation': turn.conversation,
                                  'state': 'done', 'agent_module': turn.agent_module, 'creation': ['<', turn.creation]}, fields=['question', 'answer', 'result'],
                                   order_by='creation desc', limit_page_length=4)
         messages = [message for row in reversed(previous) if not json.loads(row.result or '{}').get('synthetic') for message in
                     ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
+
+        procurement_evidence = []
 
         def execute_tool(module, tool, args):
             if tool in ('list_external_connections', 'read_external_finance'):
@@ -449,6 +550,16 @@ def run_turn(name):
                     frappe.throw('当前模块不能使用外部财务工具', frappe.PermissionError)
                 from suke_ops.finance_sync.api import agent_call
                 return agent_call(tool, args)
+            if module in ('buying','buying-demand','buying-inquiry','buying-comparison') and tool in ('procurement_intake','procurement_compare','procurement_search'):
+                from suke_ops.procurement_bridge import run
+                from suke_ops.procurement_workflow import guard, previous_workflow
+                try:
+                    guard(previous_workflow(turn.conversation),tool)
+                    value = run(tool, [row.question for row in reversed(previous)] + [turn.question])
+                except ValueError as error:
+                    value = {'backend': 'ivvli/procurement-agent', 'errors': [str(error)]}
+                procurement_evidence.append({'tool': tool, 'result': value})
+                return value
             if tool == 'report_action':
                 if not args['reason'].strip() or not args['next_step'].strip():
                     raise RuntimeError('行动结果缺少具体原因或下一步。')
@@ -534,7 +645,8 @@ def run_turn(name):
             from suke_ops.parallel_work import run_parallel
             jobs, prepared = [], {}
             remaining = len({args['module'] for args in requests} - {row['module'] for row in module_results})
-            for args in requests:
+            # 先分配登记任务，避免旁支查询耗尽主任务的建单与回报预算。
+            for args in sorted(requests, key=lambda args: args['module'] not in demand.MODULES):
                 target = args['module']
                 previous_result = next((row for row in module_results if row['module'] == target), None)
                 if previous_result:
@@ -550,13 +662,15 @@ def run_turn(name):
                     continue
                 tool_budget[0] -= 1  # Program pre-read is a real read, not a free model tool.
                 # 调用线程分配子预算，需求最多5轮，总控预留2轮；完成后归还剩余额度。
-                quota = min(5 if target in demand.MODULES else 4, max(0, budget[0]-2) // max(1, remaining))
+                available = max(0, budget[0]-2)
+                quota = min(5, available) if target in demand.MODULES else min(4, available // max(1, remaining))
                 tools_quota = min(10, tool_budget[0] // max(1, remaining))
                 remaining -= 1
                 budget[0] -= quota
                 tool_budget[0] -= tools_quota
                 evidence = dispatch(target, 'read_module_board', {})
-                jobs.append({'module': target, 'question': args['question'], 'evidence': evidence,
+                jobs.append({'module': target, 'question': runtime.delegation_question(turn.question, args['question']),
+                             'history': messages, 'evidence': evidence,
                              'budget': [quota], 'tool_budget': [tools_quota], 'specs': module_tools(target)})
                 audit(target, 'started', '正在核查；独立部门同时进行。')
 
@@ -564,7 +678,7 @@ def run_turn(name):
                 started, child_trace = time.monotonic(), []
                 try:
                     answer = runtime.respond(job['module'], job['question'] + '\n向总控用最多3条短句汇报关键发现、依据和待确认事项，不重复背景。',
-                        [], job['specs'], lambda *args: call('tool', *args), child_trace,
+                        job['history'], job['specs'], lambda *args: call('tool', *args), child_trace,
                         budget=job['budget'], tool_budget=job['tool_budget'], initial_evidence=job['evidence'])
                     result = {'module': job['module'], 'status': 'done', 'answer': answer}
                 except Exception:
@@ -621,6 +735,9 @@ def run_turn(name):
         try:
             tool_budget[0] -= 1
             initial = dispatch(turn.agent_module, 'read_module_reports' if turn.agent_module == 'control' else 'read_module_board', {})
+            if stored.get('handoff_context'):
+                from suke_ops.handoff import reference
+                initial = {**initial, 'client_background': reference(stored['handoff_context'])}
             answer = runtime.respond(turn.agent_module, turn.question, messages, specs, dispatch, trace,
                                      budget=budget, tool_budget=tool_budget, initial_evidence=initial,
                                      batch_dispatch=dispatch_many)
@@ -663,8 +780,9 @@ def run_turn(name):
                 answer += '\n' + knowledge['note']
             answer += '\n历史参考不覆盖当前事实和人工审批。'
         frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
-                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'events': events, 'action': action, 'documents': documents,
+                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'procurement': procurement_evidence, 'events': events, 'action': action, 'documents': documents,
                                 **({'knowledge': knowledge, 'procurement_context': stored['procurement_context']} if knowledge else {}),
+                                **({'handoff_context': stored['handoff_context']} if stored.get('handoff_context') else {}),
                                 'timing': {'total_ms': round((time.monotonic()-run_started)*1000),
                                            'model_calls': sum(row.get('tool') == 'model_request' for row in trace)}}, ensure_ascii=False, default=str)})
     except Exception as error:
