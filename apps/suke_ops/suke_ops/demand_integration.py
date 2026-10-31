@@ -32,8 +32,22 @@ def run():
 
         def turn(conversation=None, module='buying-demand'):
             return frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation or str(uuid.uuid4()),
-                                   'agent_module': module, 'question': '采购17件合成物料，下周需要，请登记需求单。',
+                                   'agent_module': module, 'question': f'采购17 Nos的{code}，下周需要，请登记需求单。',
                                    'state': 'queued'}).insert(ignore_permissions=True)
+
+        for wording in ('采购17个手机配件，请登记', f'采购17 Nos的{code}-OTHER，请登记'):
+            unselected=turn()
+            unselected.question=wording
+            unselected.answer=f'助手建议选择{code}，这不代表用户确认'
+            unselected.save(ignore_permissions=True)
+            before_unselected=frappe.db.count('Material Request')
+            try:
+                demand.create('buying-demand',unselected,**payload)
+                raise AssertionError('用户未选定物料却创建了需求单')
+            except RuntimeError as error:
+                assert '用户选定' in str(error),str(error)
+            assert frappe.db.count('Material Request')==before_unselected
+        checks.append('泛称、相似编码和助手推荐不能代替用户选料；服务端拒绝猜测建单')
 
         final = {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '需求已登记，请核对提交后进入询价。'}]}
         report = call('report_action', {'status': 'document_created', 'reason': '已保存物料需求单草稿。',
