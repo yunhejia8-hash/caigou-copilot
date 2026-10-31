@@ -379,6 +379,10 @@ def module_tools(module):
                            {'doctype': runtime.text_schema(AGENT_DOCS[module] + SHARED_DOCS), 'name': runtime.text_schema()}, ['doctype', 'name']),
             runtime.schema('compare_supply_case', '调用程序计算现存、锁定、待确认供货及销售/生产两方案',
                            {'name': runtime.text_schema()}, ['name'])]
+    if module in ('buying','buying-demand','buying-inquiry','buying-comparison'):
+        specs += [runtime.schema('procurement_intake', '调用用户procurement-agent仓库的需求提取和字段校验，直接读取本人的会话原文；缺失项在原对话追问，不创建单据', {}),
+                  runtime.schema('procurement_compare', '调用用户仓库的报价提取、规格单位税运交期核对和到仓金额比较；直接读取本人最近报价原文，无需模型传入数字。无综合评分。', {}),
+                  runtime.schema('procurement_search', '用户要求联网询价时调用原仓库搜索服务，只发送物料规格数量单位并返回来源；不发送姓名预算，不作供应商承诺', {})]
     if module == 'buying':
         specs.append(runtime.schema('read_procurement_progress', '读取采购六环节的进度和专项Agent最新汇报', {}))
     if module in MODULE_DOCS:
@@ -408,7 +412,17 @@ def run_turn(name):
         messages = [message for row in reversed(previous) for message in
                     ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
 
+        procurement_evidence = []
+
         def dispatch(module, tool, args):
+            if module in ('buying','buying-demand','buying-inquiry','buying-comparison') and tool in ('procurement_intake','procurement_compare','procurement_search'):
+                from suke_ops.procurement_bridge import run
+                try:
+                    value = run(tool, [row.question for row in reversed(previous)] + [turn.question])
+                except ValueError as error:
+                    value = {'backend': 'ivvli/procurement-agent', 'errors': [str(error)]}
+                procurement_evidence.append({'tool': tool, 'result': value})
+                return value
             if module == 'buying' and tool == 'read_procurement_progress':
                 return {'stages': [stage_board(key) for key in STAGE_DOCS],
                         'reports': [row for row in latest_reports() if row['module'] in STAGE_DOCS]}
@@ -475,7 +489,7 @@ def run_turn(name):
         if failed_modules:
             answer += '\n\n未核实模块：' + '、'.join(failed_modules) + '。可切换对应模块重试。'
         frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
-                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results}, ensure_ascii=False, default=str)})
+                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'procurement': procurement_evidence}, ensure_ascii=False, default=str)})
     except Exception as error:
         frappe.db.rollback()
         frappe.db.set_value('Agent Turn', name, {'state': 'failed',

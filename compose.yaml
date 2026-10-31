@@ -8,6 +8,9 @@ x-app: &app
     - logs:/home/frappe/frappe-bench/logs
   environment: &environment
     SITE_NAME: focus.local
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    OPENAI_MODEL: ${OPENAI_MODEL:-}
+    OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
     ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
     ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
     ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}

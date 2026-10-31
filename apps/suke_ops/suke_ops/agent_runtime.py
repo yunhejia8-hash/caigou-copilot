@@ -36,10 +36,14 @@ SPECIALTY.update({
 
 
 def configured():
-    return all(os.environ.get(key) for key in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL'))
+    from suke_ops.responses_provider import configured as responses_configured
+    return responses_configured() or all(os.environ.get(key) for key in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL'))
 
 
 def request_model(system, messages, tools):
+    from suke_ops import responses_provider
+    if not all(os.environ.get(key) for key in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL')) and responses_provider.configured():
+        return responses_provider.request_model(system, messages, tools)
     if not configured():
         raise RuntimeError('尚未配置模型服务；请继续使用手动业务入口。')
     base = os.environ['ANTHROPIC_BASE_URL'].rstrip('/')
@@ -84,6 +88,8 @@ def respond(module, question, history, tool_specs, dispatch, trace, provider=Non
     system = RULES + ('\n你是总控，研判模块上报时先调用 read_module_reports 读取上报与当前数据；需要深入分析时调用 ask_module 委派给相关模块。综合各模块问题、影响和处理优先级，给出决策建议；批准及执行仍由负责人完成。' if module == 'control'
                       else '\n你是' + MODULES[module] + ' Agent。' + SPECIALTY[module])
     system += '\n模块Agent的回答同时作为向总控的汇报，必须说明已发现问题、业务依据、影响、处理建议及需要总控协调的事项；无问题或未核实须如实标注。默认先给结论，再列最多5条关键事实与下一步，用户要求细节时再展开。摘要问题读取一次模块面板即可回答，只有用户明确要求某张单据细节时才继续逐单查询。每个模块仅委派一次，先取得所有相关模块摘要再汇总。每批最多6个工具；同样参数只查询一次。模块失败时明确列出未核实部分，不得补造事实。'
+    if module in ('buying', 'buying-demand', 'buying-inquiry', 'buying-comparison'):
+        system += '\n用户描述新采购需求时调用 procurement_intake；提供报价、要求比价时调用 procurement_compare；用户明确要求网上查价时调用 procurement_search。它们复用需有据仓库后台。工具的missing/issues/errors必须如实追问，金额只引用计算结果。网页结果仅为参考，不是供应商承诺。不得编造评分或声称已创建ERP单据。报价修改须提供完整新版报价，不能沿用旧价格假定已更新。'
     messages = [*history[-8:], {'role': 'user', 'content': question}]
     allowed = {tool['name']: tool['input_schema'] for tool in tool_specs}
     used_tool = False
