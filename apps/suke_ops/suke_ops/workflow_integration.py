@@ -46,7 +46,8 @@ def run():
         with patch.object(flow.procurement_bridge.quotes,'model_enabled',return_value=False):
             _,r=step('开始比价')
         assert r['workflow']['phase']=='compared' and r['procurement'][0]['result']['lowest_total']==1850
-        checks.append('显式开始比价后调用原仓库，得到1850/2000元')
+        assert r['workflow']['approval']['status']=='approved' and r['application']['approval']['amount']==1850
+        checks.append('显式比价得到1850/2000元，最终1850元方案审批自动通过并持久化')
         _,r=step('预算改为3000元')
         assert r['workflow']['phase']=='awaiting_confirmation' and r['workflow']['revision']==wf['revision']+1
         _,r=step(f"确认申请 {wf['id']} 第{wf['revision']}版")

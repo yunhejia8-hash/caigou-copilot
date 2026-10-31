@@ -226,7 +226,7 @@ frappe.SupplyHub = class {
         const current = latest?.id === app.id && latest?.revision === app.revision;
         const active = latest?.id === app.id && latest?.revision === app.revision && latest?.phase === 'awaiting_confirmation';
         const safe = url => typeof url === 'string' && /^\/api\/method\/suke_ops\.procurement_workflow\.application_pdf\?/.test(url);
-        return `<section class="hub-application"><div><strong>采购需求申请表</strong><span>${this.esc(({inquiry:'申请已确认 · 询价中',quotations_ready:'申请已确认 · 报价待核对',compared:'申请已确认 · 比价完成'})[app.phase] || app.status)}</span></div><small>${this.esc(app.id)} · 第${Number(app.revision)}版 · 收货仓尚未核实ERP主数据</small><div class="hub-application-actions">${safe(app.preview_url) ? `<a href="${this.esc(app.preview_url)}" target="_blank" rel="noopener noreferrer">预览 PDF ↗</a>` : ''}${safe(app.download_url) ? `<a href="${this.esc(app.download_url)}">下载 PDF ↓</a>` : ''}${current && ['inquiry','quotations_ready','compared'].includes(latest.phase) ? '<button type="button" data-quote-image>发送报价图片</button>' : ''}${current && latest.phase === 'quotations_ready' ? '<button type="button" data-start-comparison>开始比价</button>' : ''}${active && safe(app.preview_url) ? `<button type="button" data-confirm-application="${this.esc(app.id)}" data-revision="${Number(app.revision)}">确认申请，进入询价</button>` : ''}</div></section>`;
+        return `<section class="hub-application"><div><strong>采购需求申请表</strong><span>${this.esc(app.approval?.label || ({inquiry:'申请已确认 · 询价中',quotations_ready:'申请已确认 · 报价待核对',compared:'申请已确认 · 比价完成'})[app.phase] || app.status)}</span></div><small>${this.esc(app.id)} · 第${Number(app.revision)}版 · 收货仓尚未核实ERP主数据</small>${app.approval ? `<p>${this.esc(app.approval.basis)}：¥${Number(app.approval.amount).toLocaleString('zh-CN', {minimumFractionDigits:2,maximumFractionDigits:2})} · 超过 ¥100,000 需人工审核</p>` : ''}<div class="hub-application-actions">${safe(app.preview_url) ? `<a href="${this.esc(app.preview_url)}" target="_blank" rel="noopener noreferrer">预览 PDF ↗</a>` : ''}${safe(app.download_url) ? `<a href="${this.esc(app.download_url)}">下载 PDF ↓</a>` : ''}${current && ['inquiry','quotations_ready','compared'].includes(latest.phase) ? '<button type="button" data-quote-image>发送报价图片</button>' : ''}${current && ['quotations_ready','compared'].includes(latest.phase) ? '<button type="button" data-start-comparison>开始比价</button>' : ''}${active && safe(app.preview_url) ? `<button type="button" data-confirm-application="${this.esc(app.id)}" data-revision="${Number(app.revision)}">确认申请，进入询价</button>` : ''}</div></section>`;
     }
     procurementEvidence(turn) {
         return (turn.procurement || []).map(entry => {
@@ -325,7 +325,7 @@ frappe.SupplyHub = class {
         this.busy = true;
         this.renderBusy();
         try {
-            const response = await this.call('start', {question, module, client_version: 'procurement-qa-v1', conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario});
+            const response = await this.call('start', {question, module, client_version: 'procurement-approval-v1', conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario});
             const turn = {...response, question, agent_module: module, state: 'queued'};
             this.turns.push(turn);
             if (this.host[0]?.isConnected) this.refreshActivity();

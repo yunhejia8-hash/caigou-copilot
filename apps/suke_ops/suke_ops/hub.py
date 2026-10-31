@@ -291,7 +291,7 @@ def owned_turn(name):
 def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, quote_image=None, client_version=None):
     require_user()
     check_module(module, control=True)
-    if getattr(getattr(frappe, 'request', None), 'method', None) == 'POST' and client_version != 'procurement-qa-v1':
+    if getattr(getattr(frappe, 'request', None), 'method', None) == 'POST' and client_version != 'procurement-approval-v1':
         frappe.throw('工作台已更新，请刷新页面后再发送；本次未创建任务，输入内容已保留。')
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
         frappe.throw('请输入 1–2000 字的问题。')

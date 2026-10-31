@@ -1,6 +1,6 @@
 frappe.pages['operations-buying-approval'].on_page_load = function(wrapper) {
     const page = frappe.ui.make_app_page({parent: wrapper, title: '审批工作台', single_column: true});
-    frappe.require(['/assets/suke_ops/hub.css?v=procurement-qa-v1.css', '/assets/suke_ops/hub.js?v=procurement-qa-v1.js'], () => {
+    frappe.require(['/assets/suke_ops/hub.css?v=procurement-approval-v1.css', '/assets/suke_ops/hub.js?v=procurement-approval-v1.js'], () => {
         wrapper.supply_hub = new frappe.SupplyHub(page, 'chat', 'buying-approval');
     });
 };

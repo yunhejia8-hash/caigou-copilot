@@ -103,13 +103,43 @@ class WorkflowTests(unittest.TestCase):
     def test_application_metadata_endpoint_has_no_secret_file_path(self):
         r=workflow.document(self.ready());self.assertNotIn('file',r);self.assertNotIn('/private/',json.dumps(r))
     def test_threshold_strictly_above_and_budget_independent(self):
-        for value, expected in [(9999.99,False),(10000,False),(10000.01,True)]:
-            r=workflow.approval_reminder(value,20000)
+        for value, expected in [(99999.99,False),(100000,False),(100000.01,True)]:
+            r=workflow.evaluate_approval(value,20000)
             self.assertEqual(r['requires_escalation'],expected)
-            self.assertEqual(r['status'],'reminder_only')
-        self.assertTrue(workflow.approval_reminder(9000,8000)['over_budget'])
+            self.assertEqual(r['status'],'pending_review' if expected else 'approved')
+        self.assertTrue(workflow.evaluate_approval(9000,8000)['over_budget'])
         for value in ('NaN','Infinity',-1):
-            with self.assertRaises(ValueError):workflow.approval_reminder(value)
+            with self.assertRaises(ValueError):workflow.evaluate_approval(value)
+    def test_approval_saved_for_final_amount_and_exposed_on_application(self):
+        for amount, status in [(99999.99,'approved'),(100000,'approved'),(100000.01,'pending_review')]:
+            wf=self.confirm(self.ready())
+            wf.update(phase='quotations_ready',saved_quotes=[{'supplier':'A'},{'supplier':'B'}])
+            with patch.object(workflow.procurement_bridge,'run',return_value={'quotes':[{},{}],'comparable_count':2,'lowest_total':amount}):
+                result=self.process('开始比价',wf)
+            approval=result['workflow']['approval']
+            self.assertEqual(approval['status'],status)
+            self.assertEqual(approval['amount'],amount)
+            self.assertEqual(approval['revision'],wf['revision'])
+            self.assertEqual(result['application']['approval'],approval)
+            self.assertEqual(result['application']['status'],approval['label'])
+    def test_incomplete_comparison_cannot_approve_even_with_one_price(self):
+        wf=self.confirm(self.ready())
+        wf.update(phase='compared',saved_quotes=[{'supplier':'A'}],approval={'status':'approved'})
+        for total,count in [(None,0),(100,1)]:
+            with patch.object(workflow.procurement_bridge,'run',return_value={'quotes':[{}],'comparable_count':count,'lowest_total':total}):
+                result=self.process('开始比价',wf)
+            self.assertNotIn('approval',result['workflow'])
+            self.assertEqual(result['workflow']['phase'],'quotations_ready')
+    def test_quote_edit_invalidates_approval(self):
+        wf=self.confirm(self.ready())
+        with patch.object(workflow.procurement_bridge.quotes,'model_enabled',return_value=False):
+            wf=self.process(QUOTE+'\n\n'+QUOTE.replace('A厂','B厂'),wf)['workflow']
+            wf=self.process('开始比价',wf)['workflow']
+            self.assertEqual(wf['approval']['status'],'approved')
+            result=self.process('补充报价：供应商：A厂，付款：验收后45天',wf)
+        self.assertEqual(result['workflow']['phase'],'quotations_ready')
+        self.assertNotIn('approval',result['workflow'])
+
     def test_image_cannot_skip_application_confirmation(self):
         turn=self.turn('识别询价图片');turn.result=json.dumps({'quote_image':'PRIVATE'})
         with self.assertRaises(ValueError):workflow.process(turn,self.ready())
@@ -122,13 +152,13 @@ class WorkflowTests(unittest.TestCase):
             saved=workflow.process(turn,wf)
             self.assertEqual(saved['workflow']['phase'],'quotations_ready')
             self.assertEqual(bridge.call_args.args[0],'procurement_compare')
-        with patch.object(workflow.procurement_bridge,'run',return_value={'quotes':[{},{}],'comparable_count':2,'lowest_total':12500}) as bridge:
+        with patch.object(workflow.procurement_bridge,'run',return_value={'quotes':[{},{}],'comparable_count':2,'lowest_total':125000}) as bridge:
             result=self.process('开始比价',saved['workflow'])
-        self.assertTrue(result['workflow']['approval_reminder']['requires_escalation'])
+        self.assertTrue(result['workflow']['approval']['requires_escalation'])
         self.assertEqual(bridge.call_args.kwargs['image_quotes'],[row])
         edited=self.process('预算改为3000元',result['workflow'])
         self.assertNotIn('image_quotes',edited['workflow'])
-        self.assertNotIn('approval_reminder',edited['workflow'])
+        self.assertNotIn('approval',edited['workflow'])
     def test_private_upload_owner_and_remote_rejected(self):
         procurement_images=importlib.import_module('suke_ops.procurement_images')
         f=MagicMock();f.session.user='alice';f.PermissionError=PermissionError
@@ -197,12 +227,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result['workflow']['phase'],'awaiting_confirmation')
         self.assertEqual(result['workflow']['fields']['spec'],'M8×30')
     def test_three_amount_boundaries_end_to_end(self):
-        for amount, expected in [(9999.99,False),(10000,False),(10000.01,True)]:
+        for amount, expected in [(99999.99,False),(100000,False),(100000.01,True)]:
             rows=[dict(supplier=name,material='伺服驱动器',spec='QA-750W',quantity=1,unit='台',unit_price=amount+i,freight=0,tax='含税',delivery='2026-11-05',valid_until='2026-11-04',payment='验收后30天') for i,name in enumerate(('测试A','测试B'))]
             with patch.object(workflow.procurement_bridge.intake,'today',return_value=__import__('datetime').date(2026,10,31)):
                 r=workflow.procurement_bridge.run('procurement_compare',[],fields=dict(material_name='伺服驱动器',spec='QA-750W',quantity=1,unit='台',needed_by='2026-11-10'),image_quotes=rows)
             self.assertEqual(r['lowest_total'],amount)
-            self.assertEqual(workflow.approval_reminder(r['lowest_total'],20000)['requires_escalation'],expected)
+            self.assertEqual(workflow.evaluate_approval(r['lowest_total'],20000)['requires_escalation'],expected)
 
     def test_named_partial_quote_keeps_other_supplier(self):
         wf=self.confirm(self.ready())
