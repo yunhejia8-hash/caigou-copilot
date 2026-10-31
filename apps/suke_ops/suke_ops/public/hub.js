@@ -62,6 +62,10 @@ frappe.SupplyHub = class {
         this.host.on('click', '[data-run-trace]', () => this.runTracePreview());
         this.host.on('click', '[data-priority-preview]', () => this.priorityDialog());
         this.host.on('click', '[data-priority-review]', event => this.priorityDialog(event.currentTarget.dataset.priorityReview));
+        this.host.on('click', '[data-resolution-action]', event => {
+            const {resolutionTurn, resolutionAction, planId, orderName} = event.currentTarget.dataset;
+            this.resolutionDialog(resolutionTurn, resolutionAction, {plan_id: planId, order_name: orderName});
+        });
         this.host.on('click', '[data-scenario-update]', event => {
             this.send('供应商提前批从200改为120，请追查旧来源、受影响的候选方案与工单，只汇报变化和需要谁确认。',
                 {previous_turn: event.currentTarget.dataset.scenarioUpdate, scenario_update: 'supplier_120'});
@@ -158,7 +162,7 @@ frappe.SupplyHub = class {
     }
     contextPrefix() {
         if (this.orderName) return `当前采购订单号：${JSON.stringify(this.orderName)}。请先读取该订单最新明细及关联收货，核对交期、未收数量、供应确认和关联需求；现存不等于可用，不能把未确认到货当作库存。说明信息缺口与费用依据，不把预计收益当成实际节省。只提供建议或未保存草稿，审批与执行由负责人确认。\n采购员问题：`;
-        return this.caseName ? `当前供应异常单号：${JSON.stringify(this.caseName)}。请先读取该单最新数据，保持已有预留，不将未确认供应计入可用；涉及方案选择、审批与执行时引导用户回原异常页面确认。\n采购员问题：` : '';
+        return this.caseName ? `当前供应异常单号：${JSON.stringify(this.caseName)}。请先读取该单最新数据，保持已有预留，不将未确认供应计入可用；在结果卡选择方案、提交审批，批准后再由有权限的用户执行。合成场景只比较方案，不产生真实审批或执行。\n采购员问题：` : '';
     }
     esc(value) { return frappe.utils.escape_html(String(value ?? '')); }
     answer(value) {
@@ -359,6 +363,101 @@ frappe.SupplyHub = class {
         <section class="hub-action-section hub-reason"><h4>原因与影响</h4><p>${this.esc(reason ? (reason.length > 200 ? this.plainSummary(reason, 200) : reason) : '尚未提供具体原因，请查看查询记录。').replace(/\n/g, '<br>')}</p>${reason.length > 200 ? `<details data-audit-key="reason-${this.esc(turn.name)}"><summary>展开完整原因</summary><p>${this.esc(reason).replace(/\n/g, '<br>')}</p></details>` : ''}</section>
         <section class="hub-action-section" data-section="next"><h4>下一步</h4>${this.actionSteps(next)}</section></section>`;
     }
+    resolutionAllowed(turn, action, args = {}) {
+        const result = turn?.resolution;
+        if (!result || !['done', 'failed'].includes(turn.state)) return false;
+        if (action === 'refresh') return true;
+        if (result.kind === 'synthetic' || result.case?.is_simulation || turn.synthetic || turn.verified_evidence) return false;
+        if (action === 'bind_case') return result.kind === 'unbound';
+        if (result.kind !== 'erp') return false;
+        const permission = action === 'submit_order' ? 'submit_orders' : action;
+        if (!result.can?.[permission]) return false;
+        if (action === 'choose') return result.choices?.some(choice => choice.id === args.plan_id) || false;
+        if (action === 'submit_order') return result.approved_orders?.some(order => order.name === args.order_name && order.docstatus === 0 && order.can_submit !== false && order.source_hash) || false;
+        return ['approve', 'reject', 'execute'].includes(action);
+    }
+    async resolutionRequest(turn, action, args = {}, context = {conversation: this.conversation, module: this.module}) {
+        if (context.conversation !== this.conversation || context.module !== this.module || !this.turns.includes(turn)) return;
+        if (this.busy || this.restoring || !this.resolutionAllowed(turn, action, args)) return;
+        this.resolutionPending ||= new Set();
+        const key = context.conversation + ':' + turn.name;
+        if (this.resolutionPending.has(key)) return;
+        this.resolutionPending.add(key);
+        this.renderMessages();
+        try {
+            const updated = await this.call(action === 'refresh' ? 'resolution_refresh' : 'resolution_action', action === 'refresh' ? {name: turn.name} : {
+                name: turn.name, action, fingerprint: turn.resolution.fingerprint, ...args
+            });
+            if (context.conversation !== this.conversation || context.module !== this.module || !this.turns.includes(turn)) return;
+            if (!updated || updated.name !== turn.name) throw new Error('Unexpected resolution response');
+            this.turns[this.turns.indexOf(turn)] = updated;
+        } catch (_) {
+            if (context.conversation === this.conversation && context.module === this.module && this.turns.includes(turn)) frappe.msgprint('本次操作未能确认完成。请刷新审批状态后重试，避免重复执行。');
+        } finally {
+            this.resolutionPending.delete(key);
+            if (context.conversation === this.conversation && context.module === this.module) this.renderMessages();
+        }
+    }
+    resolutionDialog(name, action, args = {}) {
+        const turn = this.turns.find(row => row.name === name);
+        if (this.busy || this.restoring || !this.resolutionAllowed(turn, action, args)) return;
+        const context = {conversation: this.conversation, module: this.module};
+        const key = context.conversation + ':' + name;
+        if (this.resolutionPending?.has(key) || this.resolutionPrompt) return;
+        if (action === 'refresh') return this.resolutionRequest(turn, action, {}, context);
+        const selected = turn.resolution.choices?.find(choice => choice.id === args.plan_id);
+        const order = turn.resolution.approved_orders?.find(row => row.name === args.order_name);
+        const requestArgs = {...args, fingerprint: turn.resolution.fingerprint, ...(order ? {source_hash: order.source_hash} : {})};
+        const labels = {bind_case: '关联异常并生成方案', choose: '选择并提交审批', approve: '批准分配方案', reject: '驳回分配方案', execute: '执行库存预留', submit_order: '提交这张采购订单'};
+        const notes = {bind_case: '关联已有供应异常，重新读取业务数据生成方案；不执行库存或采购操作。', choose: '只提交分配方案审批；不预留库存，也不提交采购订单。', approve: '批准的是当前分配方案。采购订单仍按其自身审批流程处理。', reject: '驳回当前分配方案并记录原因。', execute: '将按已批准方案预留现存可用库存。未确认到货不作为当前库存，采购订单不会在此提交。', submit_order: '将提交下方这张已获审批的真实采购订单；供应商、物料及数量以该单当前版本为准。'};
+        const fields = [{fieldtype: 'HTML', options: `<p>${this.esc(notes[action])}</p>${selected ? `<p><b>${this.esc(selected.title)}</b> · ${this.esc(selected.summary)}</p>` : ''}${order ? `<p><b>${this.esc(order.name)}</b> · ${this.esc(order.supplier)} · ${this.esc(order.currency)} ${this.esc(order.grand_total ?? '金额待核实')}</p>${Array.isArray(order.items) ? `<ul>${order.items.map(item => `<li>${this.esc(item.item_code)} · ${this.esc(item.qty)} ${this.esc(item.uom)}</li>`).join('')}</ul>` : ''}` : ''}`}];
+        if (action === 'bind_case') fields.push({fieldname: 'case_name', fieldtype: 'Link', options: 'Supply Case', label: '供应异常单', reqd: 1});
+        fields.push({fieldname: 'reason', fieldtype: 'Small Text', label: action === 'choose' ? '选择理由' : '操作说明', reqd: 1});
+        this.resolutionPrompt = key;
+        const dialog = frappe.prompt(fields, values => {
+            if (this.resolutionPrompt === key) this.resolutionPrompt = null;
+            if (context.conversation !== this.conversation || context.module !== this.module || !this.turns.includes(turn)) return frappe.msgprint('对话或结果已更新，请在原对话的最新结果卡重新操作。');
+            const reason = typeof values.reason === 'string' ? values.reason.trim() : '';
+            if (!reason || reason.length > 500) return frappe.msgprint('请填写 1–500 字的操作说明。');
+            if (action === 'bind_case' && !values.case_name) return frappe.msgprint('请选择供应异常单。');
+            return this.resolutionRequest(turn, action, {...requestArgs, reason, ...(action === 'bind_case' ? {case_name: values.case_name} : {})}, context);
+        }, labels[action], labels[action]);
+        dialog?.$wrapper?.on('hidden.bs.modal', () => { if (this.resolutionPrompt === key) this.resolutionPrompt = null; });
+    }
+    resolutionCard(turn) {
+        const result = turn.resolution;
+        if (!result || !['done', 'failed'].includes(turn.state)) return '';
+        const synthetic = result.kind === 'synthetic' || result.case?.is_simulation || turn.synthetic || Boolean(turn.verified_evidence);
+        const states = {needs_choice: '采购待你决定', pending_approval: '分配方案待审批', approved: '分配已批准 · 待执行', executed: '方案执行已完成', blocked: '先补齐条件', stale: '数据已变化 · 请刷新'};
+        const state = Object.hasOwn(states, result.state) ? result.state : 'blocked';
+        const number = value => typeof value === 'number' && Number.isFinite(value) ? this.esc(value) : '待核实';
+        const busy = this.busy || this.restoring || this.resolutionPending?.has(this.conversation + ':' + turn.name);
+        const button = (action, label, args = {}, primary = false) => `<button type="button" class="hub-resolution-button${primary ? ' is-primary' : ''}" data-resolution-turn="${this.esc(turn.name)}" data-resolution-action="${action}"${args.plan_id ? ` data-plan-id="${this.esc(args.plan_id)}"` : ''}${args.order_name ? ` data-order-name="${this.esc(args.order_name)}"` : ''}${busy || !this.resolutionAllowed(turn, action, args) ? ' disabled' : ''}>${label}</button>`;
+        const selected = typeof result.selected_plan === 'object' ? result.selected_plan?.id : result.selected_plan;
+        const choices = Array.isArray(result.choices) ? result.choices : [];
+        const orders = Array.isArray(result.approved_orders) ? result.approved_orders : [];
+        const requirements = Array.isArray(result.requirements) ? result.requirements : [];
+        const execution = result.execution_result || result.execution;
+        const documentLabels = {'Sales Order': '销售订单', 'Work Order': '生产工单', 'Material Request': '物料需求单'};
+        const unit = (row, choice = {}) => this.esc(row.stock_uom || choice.stock_uom || result.case?.stock_uom || '单位待核实');
+        const actions = Array.isArray(turn.resolution_actions) ? turn.resolution_actions : [];
+        const actionLabels = {bind_case: '关联异常', choose: '选择并送审', approve: '批准分配', reject: '驳回方案', execute: '执行库存预留', submit_order: '提交采购订单'};
+        return `<section class="hub-resolution" data-state="${state}"><header class="hub-resolution-heading"><div><small>${synthetic ? '合成演示 · 不可执行' : '采购处置'}</small><h3>${synthetic ? '方案预览 · 不执行' : states[state]}</h3></div>${button('refresh', '刷新审批状态')}</header>
+        ${result.title ? `<h4>${this.esc(result.title)}</h4>` : ''}<p class="hub-resolution-summary">${this.esc(result.summary || '请核对方案与条件，再进行下一步。')}</p>
+        ${result.case?.name ? `<div class="hub-resolution-context">${this.link('Supply Case', result.case.name)}<span>${this.esc(result.case.item_code)} · ${this.esc(result.case.warehouse)}</span></div>` : ''}
+        ${result.kind === 'unbound' && !synthetic ? `<div class="hub-resolution-bind"><p>关联当前异常后，读取实际库存与需求形成可审批方案。</p>${button('bind_case', '关联异常并生成方案', {}, true)}</div>` : ''}
+        ${choices.length ? `<div class="hub-resolution-choices">${choices.map(choice => `<article class="hub-resolution-choice${selected === choice.id ? ' is-selected' : ''}"><header><h4>${this.esc(choice.title)}</h4>${selected === choice.id ? '<span class="hub-proof-badge">已选方案</span>' : ''}</header><p>${this.esc(choice.summary)}</p><div class="hub-resolution-metrics"><div><small>当前自由库存 · ${unit(choice)}</small><strong>${number(choice.current_free_qty)}</strong></div><div><small>方案后仍缺 · ${unit(choice)}</small><strong>${number(choice.shortage_qty)}</strong></div></div>
+        <div class="hub-table-scroll"><table class="hub-resolution-allocation"><thead><tr><th>保障对象 / 单位</th><th>需求</th><th>可分配</th><th>仍缺</th></tr></thead><tbody>${(Array.isArray(choice.allocations) ? choice.allocations : []).map(row => `<tr><th>${this.esc(row.document)}<small>${this.esc(documentLabels[row.document_type] || row.document_type || '')} · ${unit(row, choice)}</small></th><td>${number(row.qty)}</td><td>${number(row.allocated_qty)}${typeof row.current_new_qty === 'number' ? `<small>本次新增 ${number(row.current_new_qty)} ${unit(row, choice)}</small>` : ''}</td><td>${number(row.shortage_qty)}</td></tr>`).join('')}</tbody></table></div>
+        ${synthetic && Object.hasOwn(choice, 'conditional_supply_qty') ? `<details class="hub-resolution-conditional" data-audit-key="resolution-conditional-${this.esc(turn.name)}-${this.esc(choice.id)}"><summary>条件落实后候选 · 不计入当前可执行量</summary><p>候选供给 ${number(choice.conditional_supply_qty)} ${unit(choice)}；仍缺 ${number(choice.conditional_shortage_qty)} ${unit(choice)}。</p><div class="hub-table-scroll"><table><thead><tr><th>保障对象 / 单位</th><th>条件候选</th><th>仍缺</th></tr></thead><tbody>${(Array.isArray(choice.allocations) ? choice.allocations : []).map(row => `<tr><th>${this.esc(row.document)}<small>${unit(row, choice)}</small></th><td>${number(row.conditional_allocated_qty)}</td><td>${number(row.conditional_shortage_qty)}</td></tr>`).join('')}</tbody></table></div><p>仅在相关审批、到仓和可用时点全部落实后重新核验，不构成齐料承诺。</p></details>` : ''}
+        <p class="hub-resolution-cost"><b>费用</b> ${typeof choice.cost === 'number' && Number.isFinite(choice.cost) ? number(choice.cost) : '待核实'}${choice.cost_note ? `<small>${this.esc(choice.cost_note)}</small>` : ''}</p>${choice.conditions?.length ? `<details data-audit-key="resolution-conditions-${this.esc(turn.name)}-${this.esc(choice.id)}"><summary>核对 ${choice.conditions.length} 项条件</summary><ul>${choice.conditions.map(condition => `<li>${this.esc(condition)}</li>`).join('')}</ul></details>` : ''}${result.can?.choose || synthetic ? button('choose', '选择并提交审批', {plan_id: choice.id}, true) : ''}</article>`).join('')}</div>` : ''}
+        ${requirements.length ? `<div class="hub-resolution-requirements"><b>下一步需要</b><ul>${requirements.map(item => `<li>${this.esc(item)}</li>`).join('')}</ul></div>` : ''}
+        ${result.selected_by || result.reason || actions.length ? `<details class="hub-resolution-history" data-audit-key="resolution-history-${this.esc(turn.name)}"><summary>选择依据与操作留痕${actions.length ? ` · ${actions.length} 条` : ''}</summary>${result.selected_by || result.reason ? `<div class="hub-resolution-selection"><b>本次选择依据</b><small>${this.esc(result.selected_by || '账号未提供')} · ${this.esc(result.selected_at || '时间未提供')}</small><p>${this.esc(result.reason || '未提供选择理由')}</p></div>` : ''}<ol>${actions.map(action => `<li><b>${this.esc(actionLabels[action.action] || action.action)}</b><small>${this.esc(action.by || '账号未提供')} · ${this.esc(action.at || '时间未提供')}</small>${action.reason ? `<p>${this.esc(this.plainSummary(action.reason, 160))}</p>${String(action.reason).length > 160 ? `<details><summary>完整说明</summary><p>${this.esc(action.reason)}</p></details>` : ''}` : ''}${action.order ? `<small>采购订单：${this.esc(action.order)}</small>` : ''}</li>`).join('')}</ol></details>` : ''}
+        ${result.decision?.name ? `<p class="hub-resolution-decision">分配审批记录：${this.link('Supply Decision', result.decision.name)} · ${this.esc(result.decision.workflow_state)}</p>` : ''}
+        <div class="hub-resolution-actions">${result.can?.approve ? button('approve', '批准分配方案', {}, true) : ''}${result.can?.reject ? button('reject', '驳回并说明原因') : ''}${result.can?.execute ? button('execute', '执行库存预留', {}, true) : ''}</div>
+        ${execution ? `<details data-audit-key="resolution-execution-${this.esc(turn.name)}"><summary>查看执行回执</summary>${Array.isArray(execution.reservations) ? `<p>执行账号：${this.esc(execution.executed_by || '未提供')} · ${this.esc(execution.executed_at || '')}</p><p>库存预留 ${execution.reservations.length} 条 · 跟进待办 ${Array.isArray(execution.tasks) ? execution.tasks.length : 0} 项</p><div>${execution.reservations.map(name => this.link('Stock Reservation Entry', name)).join(' ')}${(Array.isArray(execution.tasks) ? execution.tasks : []).map(name => this.link('ToDo', name)).join(' ')}</div>` : `<pre>${this.esc(typeof execution === 'string' ? execution : JSON.stringify(execution, null, 2))}</pre>`}</details>` : ''}
+        ${orders.length ? `<section class="hub-resolution-orders"><h4>已审批采购订单</h4><p>采购订单审批与库存分配审批分别生效；仅提交下列同一张订单。</p><div class="hub-table-scroll"><table><thead><tr><th>采购订单 / 供应商</th><th>金额</th><th>订单状态</th><th>操作</th></tr></thead><tbody>${orders.map(order => `<tr><td>${this.link('Purchase Order', order.name)}<small>${this.esc(order.supplier)}</small>${Array.isArray(order.items) && order.items.length ? `<details data-audit-key="resolution-order-${this.esc(turn.name)}-${this.esc(order.name)}"><summary>查看 ${order.items.length} 项物料</summary><ul>${order.items.map(item => `<li>${this.esc(item.item_code)} · ${this.esc(item.qty)} ${this.esc(item.uom)}</li>`).join('')}</ul></details>` : ''}</td><td>${this.esc(order.currency || '')} ${number(order.grand_total)}</td><td>已批准${typeof order.approval === 'string' && order.approval !== '已批准' ? `<small>${this.link('Operations Approval', order.approval, '查看审批依据')}</small>` : ''}<small>${order.docstatus === 1 ? '已提交' : order.docstatus === 2 ? '已取消' : '待提交'}</small></td><td>${order.docstatus === 0 && result.can?.submit_orders ? button('submit_order', '提交这张采购订单', {order_name: order.name}) : '—'}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
+        <footer>${synthetic ? '合成场景仅比较方案，不能关联真实异常、预留库存或提交采购订单。' : '数量分配不等于已齐料；分配批准不等于采购订单已批准。执行时将再次核对数据版本和权限。'}</footer></section>`;
+    }
     scenarioBrief(snapshot, key, turn = {}) {
         if (snapshot?.scenario_key !== 'connector-1286') return '';
         const c = snapshot.calculation || {}, change = snapshot.change, sources = snapshot.rich_sources || [];
@@ -436,14 +535,15 @@ frappe.SupplyHub = class {
             const replies = (turn.discussion || []).length;
             const originalAnswer = turn.answer || (turn.state === 'failed' ? '本次分析未完成，请检查记录后重试。' : '正在核对依据，反馈将逐步显示。');
             const actionResult = this.renderActionResult(turn);
+            const resolution = this.resolutionCard(turn);
             const actionMarker = actionResult ? originalAnswer.lastIndexOf('\n\n**本轮行动结果：') : -1;
             const summary = actionMarker >= 0 ? originalAnswer.slice(0, actionMarker).trim() : originalAnswer;
             const timing = turn.timing ? ` · ${(turn.timing.total_ms / 1000).toFixed(1)}秒 · ${turn.timing.model_calls}次模型请求` : '';
             const snapshot = turn.verified_evidence;
             const audit = turn.events?.length ? this.auditTrail(turn) : (turn.discussion || []).map((row,i) => `<details data-audit-key="legacy-${this.esc(turn.name)}-${i}"><summary>${this.esc(this.names[row.module])} · ${this.esc(row.phase)} · 待核实</summary><div class="hub-markdown">${this.answer(row.answer)}</div></details>`).join('');
-            return `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><div class="hub-run-head"><b>${turn.synthetic ? '合成场景 · 真实协作' : this.esc(this.names[turn.agent_module] || '总控') + ' Agent'}</b><span>${completed ? '本轮结束' : '正在协同'}${replies ? ' · ' + replies + '/10项反馈' : ''}</span></div>${this.scenarioBrief(snapshot,turn.name,turn)}
+            return `<article class="hub-message hub-user"><small>你</small><div>${this.esc(turn.question)}</div></article><article class="hub-message hub-assistant"><div class="hub-run-head"><b>${turn.synthetic ? '合成场景 · 真实协作' : this.esc(this.names[turn.agent_module] || '总控') + ' Agent'}</b><span>${completed ? '本轮结束' : '正在协同'}${replies ? ' · ' + replies + '/10项反馈' : ''}</span></div>${resolution}${resolution ? `<details class="hub-resolution-context-detail" data-audit-key="resolution-context-${this.esc(turn.name)}"><summary>查看核查依据与完整结论</summary>` : ''}${this.scenarioBrief(snapshot,turn.name,turn)}
             ${this.decisionStatus(turn.decision_check)}
-            <div class="hub-outcome"><b>${completed ? ((turn.priority_assessment || snapshot?.priority_assessment) ? '总控建议（待复核）' : actionResult ? '当前结果' : '当前结论与下一步') : '正在核查'}</b><small>${this.esc(timing)}</small><p>${this.esc(this.plainSummary(summary || '行动结果与后续安排见下方。'))}</p>${originalAnswer.length > 220 || actionMarker >= 0 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(originalAnswer)}</div></details>` : ''}</div>${actionResult}
+            <div class="hub-outcome"><b>${completed ? ((turn.priority_assessment || snapshot?.priority_assessment) ? '总控建议（待复核）' : actionResult ? '当前结果' : '当前结论与下一步') : '正在核查'}</b><small>${this.esc(timing)}</small><p>${this.esc(this.plainSummary(summary || '行动结果与后续安排见下方。'))}</p>${originalAnswer.length > 220 || actionMarker >= 0 ? `<details data-audit-key="outcome-${this.esc(turn.name)}"><summary>完整结论与边界</summary><div class="hub-markdown">${this.answer(originalAnswer)}</div></details>` : ''}</div>${actionResult}${resolution ? '</details>' : ''}
             ${completed && audit ? `<details data-audit-key="process-${this.esc(turn.name)}"><summary>查看部门协作过程 · ${turn.events?.length || replies} 条留痕</summary>${audit}</details>` : audit}${this.scenarioActions(snapshot,turn.name,turn)}
             ${turn.synthetic ? '<p class="hub-table-note">模型反馈待核实；不自动采购、不释放预留。来源没有提供人时明确留空。</p>' : ''}
             ${snapshot?.scenario_key === 'connector-1286' && !snapshot.updated && !snapshot.human_sources?.length && turn.state === 'done' ? `<button type="button" data-scenario-update="${this.esc(turn.name)}">加载10:18演示新消息：200 → 120</button>` : ''}
@@ -474,7 +574,7 @@ frappe.SupplyHub = class {
         this.busy = true;
         this.renderBusy();
         try {
-            const response = await this.call('start', {question, module, client_version: 'procurement-approval-v1', conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario,
+            const response = await this.call('start', {question, module, client_version: 'procurement-approval-v1', conversation: this.conversation, request_id: crypto.randomUUID(), ...scenario, supply_case: this.caseName || undefined,
                 ...(this.procurementProcess ? {procurement_process: this.procurementProcess, procurement_stage: this.options.procurementStage || 'order'} : {})});
             const turn = {...response, question, agent_module: module, state: 'queued'};
             this.turns.push(turn);

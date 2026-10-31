@@ -18,6 +18,35 @@ def document_hash(doc):
     data = {f: doc.get(f) for f in fields}
     for name in ('items', 'required_items', 'taxes'):
         data[name] = [{f: r.get(f) for f in row_fields} for r in (doc.get(name) or [])]
+    # These commercial terms are part of a purchase approval too. Empty additions
+    # do not invalidate an old approval whose approved business content is unchanged.
+    terms = ('terms', 'tc_name', 'payment_terms_template', 'incoterm', 'named_place',
+             'apply_discount_on', 'discount_amount', 'additional_discount_percentage',
+             'supplier_address', 'shipping_address', 'buying_price_list')
+    commercial = {key: doc.get(key) for key in terms if doc.get(key) not in (None, '', 0)}
+    if doc.get('doctype') == 'Purchase Order':
+        item_terms = ('description', 'brand', 'manufacturer', 'manufacturer_part_no', 'supplier_part_no',
+                      'material_request', 'material_request_item', 'sales_order', 'sales_order_item',
+                      'sales_order_packed_item', 'supplier_quotation', 'supplier_quotation_item')
+        specifications = [{key: row.get(key) for key in item_terms if row.get(key) not in (None, '', 0)}
+                          for row in (doc.get('items') or [])]
+        # Keep row positions so moving an approved specification to another line
+        # is a content change; absent fields alone retain the legacy signature.
+        if any(specifications):
+            commercial['item_specifications_and_sources'] = specifications
+    payment_fields = ('payment_term', 'description', 'due_date', 'invoice_portion',
+                      'payment_amount', 'mode_of_payment', 'discount_type', 'discount', 'discount_date')
+    payments = [{key: row.get(key) for key in payment_fields if row.get(key) not in (None, '', 0)}
+                for row in (doc.get('payment_schedule') or [])]
+    if any(payments):
+        commercial['payment_schedule'] = payments
+    tax_fields = ('add_deduct_tax', 'included_in_print_rate', 'rate', 'description', 'category')
+    tax_terms = [{key: row.get(key) for key in tax_fields if row.get(key) not in (None, '', 0)}
+                 for row in (doc.get('taxes') or [])]
+    if any(tax_terms):
+        commercial['tax_terms'] = tax_terms
+    if commercial:
+        data['commercial_terms'] = commercial
     return digest(json.loads(frappe.as_json(data)))
 
 

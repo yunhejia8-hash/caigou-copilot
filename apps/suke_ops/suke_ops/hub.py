@@ -235,7 +235,7 @@ def owned_turn(name):
 
 
 @frappe.whitelist(methods=['POST'])
-def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, scenario_update=None, priority_order=None, priority_reason=None, quote_image=None, client_version=None, procurement_process=None, procurement_stage='order', handoff_context=None):
+def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, scenario_update=None, priority_order=None, priority_reason=None, quote_image=None, client_version=None, procurement_process=None, procurement_stage='order', handoff_context=None, supply_case=None):
     require_user()
     check_module(module, control=True)
     from suke_ops.handoff import validate as validate_handoff
@@ -323,6 +323,13 @@ def start(question, module='control', conversation=None, request_id=None, scenar
             frappe.throw('采购流程上下文仅适用于采购或总控的业务对话')
         overview(procurement_process)  # 服务端检查公司和每张来源单据权限。
         procurement_context = {'process': procurement_process, 'stage': procurement_stage}
+    resolution_context = None
+    if supply_case:
+        from suke_ops.api import read_case
+        if scenario or module not in ('buying', 'control', 'buying-order') or not isinstance(supply_case, str) or len(supply_case) > 140:
+            frappe.throw('供应异常上下文仅适用于采购或总控业务对话。')
+        read_case(supply_case)
+        resolution_context = {'explicit_case': supply_case, 'case_names': []}
     conversation = str(uuid.UUID(conversation)) if conversation else str(uuid.uuid4())
     request_id = str(uuid.UUID(request_id)) if request_id else str(uuid.uuid4())
     key = hashlib.sha256((frappe.session.user + ':' + request_id).encode()).hexdigest()
@@ -340,7 +347,7 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         frappe.db.set_value('Agent Turn', row.name, {'state': 'failed', 'answer': '分析超时，请重新发送。'})
     doc = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation, 'request_key': key,
                          'agent_module': module, 'question': question.strip(), 'state': 'queued',
-                         'result': json.dumps({'scenario': scenario, 'quote_image': quote_image, **priority_state, 'procurement_context': procurement_context, 'handoff_context': handoff_context}, ensure_ascii=False) if scenario or quote_image or procurement_context or handoff_context else None}).insert(ignore_permissions=True)
+                         'result': json.dumps({'scenario': scenario, 'quote_image': quote_image, **priority_state, 'procurement_context': procurement_context, 'handoff_context': handoff_context, 'resolution_context': resolution_context}, ensure_ascii=False) if scenario or quote_image or procurement_context or handoff_context or resolution_context else None}).insert(ignore_permissions=True)
     frappe.enqueue('suke_ops.hub.run_turn', queue='long', timeout=900, enqueue_after_commit=True,
                    job_id='agent-' + doc.name, name=doc.name)
     return {'name': doc.name, 'conversation': conversation, 'synthetic': bool(scenario),
@@ -386,8 +393,57 @@ def scenario_preview(priority_order=None, priority_reason=None):
 @frappe.whitelist()
 def poll(name):
     doc = owned_turn(name)
+    result = json.loads(doc.result or '{}') if doc.state in ('done', 'running', 'failed') else {}
+    if doc.state in ('done', 'failed') and 'resolution' not in result:
+        result = with_resolution(doc, result)
     return {'name': doc.name, 'state': doc.state, 'answer': doc.answer,
-            **(json.loads(doc.result or '{}') if doc.state in ('done', 'running', 'failed') else {})}
+            **result}
+
+
+def with_resolution(turn, result):
+    """Append server-computed decisions, independently of model prose success."""
+    from suke_ops import decision_result
+    resolution = decision_result.build(turn, result)
+    return {**result, **({'resolution': resolution} if resolution else {})}
+
+
+def resolution_payload(turn, result):
+    return {**result, 'name': turn.name, 'question': turn.question, 'answer': turn.answer,
+            'agent_module': turn.agent_module, 'state': turn.state}
+
+
+@frappe.whitelist()
+def resolution_refresh(name):
+    turn = owned_turn(name)
+    if turn.state not in ('done', 'failed'):
+        frappe.throw('请等待本轮讨论结束后查看执行方案。')
+    return resolution_payload(turn, with_resolution(turn, json.loads(turn.result or '{}')))
+
+
+@frappe.whitelist(methods=['POST'])
+def resolution_action(name, action, plan_id=None, fingerprint=None, reason=None,
+                      case_name=None, order_name=None, source_hash=None):
+    # Ownership is checked before a lock; re-read after locking for concurrent tabs.
+    owned_turn(name)
+    frappe.db.sql('select name from `tabAgent Turn` where name=%s for update', name)
+    turn = owned_turn(name)
+    if turn.state not in ('done', 'failed'):
+        frappe.throw('请等待本轮讨论结束后操作。')
+    from suke_ops import decision_result
+    if action not in decision_result.ACTIONS:
+        frappe.throw('不支持的决策动作。')
+    provided = {'plan_id': plan_id, 'fingerprint': fingerprint, 'reason': reason,
+                'case_name': case_name, 'order_name': order_name, 'source_hash': source_hash}
+    args = {key: provided[key] for key in decision_result.ACTIONS[action] if provided[key] is not None}
+    frappe.db.savepoint('discussion_resolution')
+    try:
+        result = decision_result.act(turn, json.loads(turn.result or '{}'), action, **args)
+        frappe.db.set_value('Agent Turn', name, 'result', json.dumps(result, ensure_ascii=False, default=str))
+    except Exception:
+        frappe.db.rollback(save_point='discussion_resolution')
+        raise
+    # Frappe commits the POST transaction only after both ERP actions and receipt save.
+    return resolution_payload(turn, result)
 
 
 @frappe.whitelist()
@@ -402,7 +458,13 @@ def history(conversation, module=None):
                            fields=['name', 'question', 'answer', 'agent_module', 'state', 'result'],
                            order_by='creation desc, name desc', limit_page_length=50)
     # 一次按权限读取完整历史，保留已建单据、失败留痕和合成场景边界。
-    return [{**json.loads(row.pop('result') or '{}'), **row} for row in reversed(rows)]
+    turns = [{**json.loads(row.pop('result') or '{}'), **row} for row in reversed(rows)]
+    # Refresh only the latest completed result, so a native-form approval is visible
+    # on reopening the conversation without recomputing every historical snapshot.
+    latest = next((row for row in reversed(turns) if row['state'] in ('done', 'failed')), None)
+    if latest:
+        latest.update(with_resolution(owned_turn(latest['name']), latest))
+    return turns
 
 
 def read_record(module, doctype, name):
@@ -512,6 +574,8 @@ def run_turn(name):
     try:
         require_user()
         stored = json.loads(turn.result or '{}')
+        resolution_context = dict(stored.get('resolution_context') or {})
+        resolution_context['case_names'] = list(resolution_context.get('case_names') or [])
         if stored.get('scenario'):
             from suke_ops.live_discussion import discuss
             def publish_event(state):
@@ -524,14 +588,17 @@ def run_turn(name):
                              priority_policy=stored.get('priority_policy'))
             if stored.get('previous_turn'):
                 result['previous_turn'] = stored['previous_turn']
+            result = with_resolution(turn, result)
             frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': result['answer'],
                                 'result': json.dumps(result, ensure_ascii=False)})
             frappe.db.commit()
             return
-        if turn.agent_module in ('buying','buying-demand','buying-inquiry','buying-comparison') and not stored.get('procurement_context'):
+        from suke_ops.decision_result import wants_resolution
+        if turn.agent_module in ('buying','buying-demand','buying-inquiry','buying-comparison') and not stored.get('procurement_context') and not resolution_context.get('explicit_case') and not wants_resolution(turn.question):
             from suke_ops.procurement_workflow import process
             workflow_result = process(turn)
             if workflow_result is not None:
+                workflow_result = with_resolution(turn, workflow_result)
                 frappe.db.set_value('Agent Turn',name,{'state':'done','answer':workflow_result['answer'],
                                     'result':json.dumps(workflow_result,ensure_ascii=False,default=str)})
                 frappe.db.commit()
@@ -609,8 +676,13 @@ def run_turn(name):
                 return read_record(module, **args)
             if tool == 'compare_supply_case':
                 from suke_ops.api import get_analysis
-                result = get_analysis(args['name'])
+                if resolution_context.get('explicit_case') and args['name'] != resolution_context['explicit_case']:
+                    frappe.throw('本轮已明确关联供应异常，请只核对该异常；处理其他异常请另开对话。')
+                result = get_analysis(args['name'], scope='on_hand_only')
                 result.pop('agent', None)
+                result['execution_scope'] = '与最终结果卡采用同一口径：只分配当前自由库存，不把任何在途、可能先发或模拟承诺计入可执行量。'
+                if args['name'] not in resolution_context['case_names']:
+                    resolution_context['case_names'].append(args['name'])
                 return result
             if tool == 'offer_draft':
                 offer = draft_offer(module, **args)
@@ -623,7 +695,7 @@ def run_turn(name):
         def audit(module, kind, summary, **extra):
             events.append({'id': len(events)+1, 'module': module, 'kind': kind,
                            'phase': '业务查询', 'at': str(now_datetime()), 'summary': summary, **extra})
-            frappe.db.set_value('Agent Turn', name, 'result', json.dumps({'events': events, 'trace': trace, 'offers': offers, 'documents': documents, 'actions': action_results}, ensure_ascii=False, default=str))
+            frappe.db.set_value('Agent Turn', name, 'result', json.dumps({'events': events, 'trace': trace, 'offers': offers, 'documents': documents, 'actions': action_results, 'resolution_context': resolution_context}, ensure_ascii=False, default=str))
             frappe.db.commit()
         def dispatch(module, tool, args):
             labels = {'ask_module': '委派部门核查', 'read_module_reports': '读取部门汇报', 'read_module_board': '核查业务看板', 'list_records': '查询单据清单', 'read_record': '核对单据详情', 'compare_supply_case': '计算缺料方案', 'offer_draft': '准备草稿入口'}
@@ -735,6 +807,10 @@ def run_turn(name):
         try:
             tool_budget[0] -= 1
             initial = dispatch(turn.agent_module, 'read_module_reports' if turn.agent_module == 'control' else 'read_module_board', {})
+            if resolution_context.get('explicit_case'):
+                tool_budget[0] -= 1
+                initial = {**initial, 'bound_supply_case': resolution_context['explicit_case'],
+                           'supply_resolution': dispatch('buying', 'compare_supply_case', {'name': resolution_context['explicit_case']})}
             if stored.get('handoff_context'):
                 from suke_ops.handoff import reference
                 initial = {**initial, 'client_background': reference(stored['handoff_context'])}
@@ -779,12 +855,13 @@ def run_turn(name):
             if knowledge.get('state') == 'conflict':
                 answer += '\n' + knowledge['note']
             answer += '\n历史参考不覆盖当前事实和人工审批。'
-        frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
-                            'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'procurement': procurement_evidence, 'events': events, 'action': action, 'documents': documents,
+        result = with_resolution(turn, {'trace': trace, 'offers': offers, 'modules': module_results, 'procurement': procurement_evidence, 'events': events, 'action': action, 'documents': documents, 'resolution_context': resolution_context,
                                 **({'knowledge': knowledge, 'procurement_context': stored['procurement_context']} if knowledge else {}),
                                 **({'handoff_context': stored['handoff_context']} if stored.get('handoff_context') else {}),
                                 'timing': {'total_ms': round((time.monotonic()-run_started)*1000),
-                                           'model_calls': sum(row.get('tool') == 'model_request' for row in trace)}}, ensure_ascii=False, default=str)})
+                                           'model_calls': sum(row.get('tool') == 'model_request' for row in trace)}})
+        frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
+                            'result': json.dumps(result, ensure_ascii=False, default=str)})
     except Exception as error:
         frappe.db.rollback()
         saved = json.loads(frappe.db.get_value('Agent Turn', name, 'result') or '{}')
@@ -801,8 +878,9 @@ def run_turn(name):
             answer = ('本轮分析未完成：' + str(error) if type(error) is RuntimeError else
                       '本轮分析未完成：请检查业务权限或问题范围后重试。') + ' 业务单据未由 Agent 保存或提交。'
             state = 'failed'
+        saved = with_resolution(turn, {**saved, 'error_type': type(error).__name__, 'trace': trace})
         frappe.db.set_value('Agent Turn', name, {'state': state, 'answer': answer,
-                            'result': json.dumps({**saved, 'error_type': type(error).__name__, 'trace': trace}, ensure_ascii=False)})
+                            'result': json.dumps(saved, ensure_ascii=False, default=str)})
     frappe.db.commit()
 
 

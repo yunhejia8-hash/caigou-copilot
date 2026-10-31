@@ -26,14 +26,55 @@ def loads(value, default=None):
     return json.loads(value) if value else (default if default is not None else [])
 
 
-def snapshot(case):
+def _scope(value):
+    if value not in (None, '', 'on_hand_only'):
+        frappe.throw('不支持的方案范围')
+    return value or None
+
+
+def _scope_read(doc):
+    doc.check_permission('read')
+    rows = [doc, *(child for field in doc.meta.get_table_fields() for child in (doc.get(field.fieldname) or []))]
+    for row in rows:
+        if any(field.permlevel and not row.has_permlevel_access_to(field.fieldname) for field in row.meta.fields):
+            frappe.throw('没有读取分配方案所需来源字段的权限', frappe.PermissionError)
+
+
+def _stock_access(item, warehouse, company):
+    """The executable current-stock view must not bypass inventory permissions."""
+    for kind, name in [('Company', company), ('Item', item), ('Warehouse', warehouse)]:
+        doc = frappe.get_doc(kind, name)
+        _scope_read(doc)
+        if kind == 'Warehouse' and (doc.company != company or doc.is_group or doc.disabled):
+            frappe.throw('仓库必须是当前公司的启用明细仓库')
+    for kind in ('Bin', 'Stock Reservation Entry'):
+        if not frappe.has_permission(kind, 'read'):
+            frappe.throw('现存分配需要库存及预留读取权限', frappe.PermissionError)
+        for name in frappe.get_all(kind, filters={'item_code': item, 'warehouse': warehouse}, pluck='name'):
+            source = frappe.get_doc(kind, name)
+            _scope_read(source)
+            if kind == 'Stock Reservation Entry' and source.get('voucher_type') and source.get('voucher_no'):
+                voucher = frappe.get_doc(source.voucher_type, source.voucher_no)
+                _scope_read(voucher)
+                if voucher.get('company') != company:
+                    frappe.throw('库存预留来源不属于当前公司', frappe.PermissionError)
+
+
+def snapshot(case, scope=None):
     """从当前 ERP 读取该物料的全部未完成销售与工单，成品销售不重复进入原料需求。"""
+    scope = _scope(scope)
     item, warehouse = case.item_code, case.warehouse
+    if scope:
+        _stock_access(item, warehouse, case.company)
     demands, versions, reservations = [], [], []
     # 明确检查源单据权限；不会让 Agent 绕过角色读取业务记录。
     for row in frappe.get_all('Sales Order Item', filters={'item_code': item, 'warehouse': warehouse, 'docstatus': 1}, fields=['parent', 'name']):
         so = frappe.get_doc('Sales Order', row.parent)
         so.check_permission('read')
+        if scope:
+            _scope_read(so)
+        if scope and so.company != case.company:
+            frappe.throw('销售需求不属于当前公司', frappe.PermissionError)
         if so.status in ('Closed', 'Cancelled', 'Completed'):
             continue
         r = next(i for i in so.items if i.name == row.name)
@@ -45,6 +86,10 @@ def snapshot(case):
     for row in frappe.get_all('Work Order Item', filters={'item_code': item, 'source_warehouse': warehouse, 'docstatus': 1}, fields=['parent', 'name']):
         wo = frappe.get_doc('Work Order', row.parent)
         wo.check_permission('read')
+        if scope:
+            _scope_read(wo)
+        if scope and wo.company != case.company:
+            frappe.throw('生产需求不属于当前公司', frappe.PermissionError)
         if wo.status in ('Completed', 'Stopped', 'Closed', 'Cancelled'):
             continue
         r = next(i for i in wo.required_items if i.name == row.name)
@@ -57,6 +102,8 @@ def snapshot(case):
             if other.name == r.name:
                 continue
             needed = max(0, other.required_qty - max(other.transferred_qty, other.consumed_qty))
+            if scope and needed:
+                _stock_access(other.item_code, other.source_warehouse, case.company)
             available = flt(frappe.db.get_value('Bin', {'item_code': other.item_code, 'warehouse': other.source_warehouse}, 'actual_qty'))
             reserved = sum(flt(s.reserved_qty) - max(flt(s.delivered_qty), flt(s.transferred_qty), flt(s.consumed_qty)) for s in frappe.get_all('Stock Reservation Entry', filters={'item_code': other.item_code, 'warehouse': other.source_warehouse, 'docstatus': 1, 'voucher_no': ['!=', wo.name]}, fields=['reserved_qty', 'delivered_qty', 'transferred_qty', 'consumed_qty']))
             if available - reserved < needed:
@@ -73,7 +120,7 @@ def snapshot(case):
             reservations.append({'id': r.name, 'demand_id': r.voucher_detail_no, 'qty': qty, 'document': r.voucher_no})
             versions.append(['Stock Reservation Entry', r.name, str(r.modified)])
     supplies = []
-    for row in frappe.get_all('Purchase Order Item', filters={'item_code': item, 'warehouse': warehouse, 'docstatus': 1}, fields=['parent', 'name']):
+    for row in ([] if scope else frappe.get_all('Purchase Order Item', filters={'item_code': item, 'warehouse': warehouse, 'docstatus': 1}, fields=['parent', 'name'])):
         po = frappe.get_doc('Purchase Order', row.parent)
         po.check_permission('read')
         if po.status in ('Closed', 'Cancelled', 'Completed'):
@@ -83,7 +130,9 @@ def snapshot(case):
         if qty:
             supplies.append({'id': r.name, 'purchase_order': po.name, 'qty': qty, 'eta': str(r.schedule_date) + 'T08:00:00+08:00', 'confirmed': True})
             versions.append(['Purchase Order', po.name, str(po.modified), r.received_qty])
-    agreement = loads(case.supplier_result, {})
+    # New chat decisions authorize current stock only. Future PO dates and all
+    # simulated supplier promises must never become executable stock.
+    agreement = {} if scope else loads(case.supplier_result, {})
     if agreement.get('status') == 'confirmed_simulation':
         replacements = [r for r in supplies if r['purchase_order'] == case.purchase_order]
         total = sum(r['qty'] for r in replacements)
@@ -100,11 +149,14 @@ def snapshot(case):
         if abs(sum(r['qty'] for r in schedule) - total) > 1e-6:
             frappe.throw('分批承诺与采购剩余数量不一致，请重新议价确认')
         supplies = [r for r in supplies if r['purchase_order'] != case.purchase_order] + schedule
-    elif case.possible_early_qty:
+    elif not scope and case.possible_early_qty:
         supplies.append({'id': 'unconfirmed-early', 'qty': case.possible_early_qty, 'eta': case.early_arrival,
                          'confirmed': False, 'replaces_part_of': case.purchase_order})
     bin_doc = frappe.db.get_value('Bin', {'item_code': item, 'warehouse': warehouse}, ['actual_qty', 'modified'], as_dict=True)
-    return {'item_code': item, 'stock_uom': frappe.db.get_value('Item', item, 'stock_uom'), 'warehouse': warehouse, 'as_of': str(case.event_time).replace(' ', 'T') + '+08:00',
+    stock_uom = frappe.db.get_value('Item', item, 'stock_uom')
+    if scope and not stock_uom:
+        frappe.throw('物料缺少库存单位，不能批准或执行数量分配')
+    return {**({'scope': scope} if scope else {}), 'item_code': item, 'stock_uom': stock_uom, 'warehouse': warehouse, 'as_of': str(case.event_time).replace(' ', 'T') + '+08:00',
             'actual_qty': flt(bin_doc.actual_qty) if bin_doc else 0, 'blocked_qty': flt(case.blocked_qty),
             'demands': sorted(demands, key=lambda r: r['id']), 'supplies': sorted(supplies, key=lambda r: r['id']),
             'reservations': sorted(reservations, key=lambda r: r['id']), 'versions': sorted(versions),
@@ -114,10 +166,14 @@ def snapshot(case):
 
 
 @frappe.whitelist()
-def get_analysis(name):
+def get_analysis(name, scope=None):
     case = read_case(name)
-    ctx = snapshot(case)
-    return {'context': ctx, **compare(ctx), 'supplier': loads(case.supplier_result, {}),
+    ctx = snapshot(case, scope)
+    comparison = compare(ctx)
+    if ctx.get('scope'):
+        for plan in comparison['plans']:
+            plan['scope'] = ctx['scope']
+    return {'context': ctx, **comparison, 'supplier': loads(case.supplier_result, {}),
             'agent': loads(case.agent_result, {}), 'decisions': frappe.get_list('Supply Decision', filters={'supply_case': name}, fields=['name', 'workflow_state', 'selected_plan', 'reason', 'modified'], order_by='modified desc')}
 
 
@@ -157,12 +213,18 @@ def negotiate(name, ceiling=23, max_rounds=3, refusal=0):
 
 
 @frappe.whitelist()
-def propose(name, selected_plan, fingerprint, reason):
+def propose(name, selected_plan, fingerprint, reason, scope=None):
     case = read_case(name)
+    scope = _scope(scope)
+    if scope and case.is_simulation:
+        frappe.throw('合成案例只能演示复核，不能申请真实库存执行')
     if not reason or not str(reason).strip():
         frappe.throw('请填写方案选择依据和可接受的影响')
-    ctx = snapshot(case)
+    ctx = snapshot(case, scope)
     analysis = compare(ctx)
+    if scope:
+        for candidate in analysis['plans']:
+            candidate['scope'] = scope
     if fingerprint != analysis['fingerprint']:
         frappe.throw('库存、订单或供货已变化，请刷新后重新选择方案')
     plan = next((p for p in analysis['plans'] if p['id'] == selected_plan), None)
@@ -183,7 +245,15 @@ def validate_decision(doc, method=None):
     old = doc.get_doc_before_save()
     state = doc.workflow_state or '草稿'
     if not old or state in ('草稿', '待审批', '已批准') and (not old or old.workflow_state != state):
-        current = compare(snapshot(read_case(doc.supply_case)))
+        saved_plan = loads(doc.plan_json, {})
+        scope = _scope(saved_plan.get('scope'))
+        case = read_case(doc.supply_case)
+        if scope and case.is_simulation:
+            frappe.throw('合成案例不能批准真实库存执行')
+        current = compare(snapshot(case, scope))
+        if scope:
+            for candidate in current['plans']:
+                candidate['scope'] = scope
         if doc.snapshot_hash != current['fingerprint']:
             frappe.throw('依据已过期，请刷新分析并创建新方案')
         plan = next((p for p in current['plans'] if p['id'] == doc.selected_plan), None)
@@ -225,17 +295,37 @@ def execute(name):
     if doc.workflow_state != '已批准':
         frappe.throw('方案必须由负责人批准后才能执行')
     case = read_case(doc.supply_case)
+    plan = loads(doc.plan_json, {})
+    scope = _scope(plan.get('scope'))
+    if scope and case.is_simulation:
+        frappe.throw('合成案例不能执行真实库存操作')
     frappe.db.sql('select name from `tabBin` where item_code=%s and warehouse=%s for update', (case.item_code, case.warehouse))
-    ctx = snapshot(case)
+    ctx = snapshot(case, scope)
+    if scope:
+        # Native demand edits and a competing approved plan must not invalidate
+        # this check between reading demand quantities and inserting reservations.
+        for doctype, source in sorted({(row['document_type'], row['document']) for row in ctx['demands']}):
+            if doctype not in ('Sales Order', 'Work Order'):
+                frappe.throw('无效库存需求来源')
+            frappe.db.sql('select name from `tab' + doctype + '` where name=%s for update', source)
+        frappe.db.sql('select name from `tabStock Reservation Entry` where item_code=%s and warehouse=%s for update',
+                      (case.item_code, case.warehouse))
+        ctx = snapshot(case, scope)
     if digest(ctx) != doc.snapshot_hash:
         frappe.throw('审批后供需已变化，请重新分析和审批，未执行任何库存修改')
-    plan = loads(doc.plan_json, {})
     created, tasks = [], []
     for row in plan['allocations']:
         if row['current_new_qty'] > 0:
             from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import get_available_qty_to_reserve
             source = frappe.get_doc(row['document_type'], row['document'])
             source.check_permission('write')
+            source_rows = source.items if source.doctype == 'Sales Order' else source.required_items
+            source_row = next((detail for detail in source_rows if detail.name == row['id']), None)
+            if source_row is None:
+                frappe.throw('来源需求行已变化，请重新分析和审批')
+            # ERPNext subtracts delivered/transferred quantities itself. Passing
+            # the already reduced demand would subtract partial deliveries twice.
+            voucher_qty = source_row.stock_qty if source.doctype == 'Sales Order' else source_row.required_qty
             if source.doctype == 'Work Order' and not source.reserve_stock:
                 # 原生领料逻辑通过工单标志识别自己的预留；仅切换配置，不直接改库存数量。
                 source.db_set('reserve_stock', 1)
@@ -244,7 +334,7 @@ def execute(name):
             sre = frappe.get_doc({'doctype': 'Stock Reservation Entry', 'company': case.company,
                                  'item_code': case.item_code, 'warehouse': case.warehouse, 'stock_uom': ctx['stock_uom'],
                                  'voucher_type': row['document_type'], 'voucher_no': row['document'], 'voucher_detail_no': row['id'],
-                                 'voucher_qty': row['qty'], 'available_qty': get_available_qty_to_reserve(case.item_code, case.warehouse),
+                                 'voucher_qty': voucher_qty, 'available_qty': get_available_qty_to_reserve(case.item_code, case.warehouse),
                                  'reserved_qty': row['current_new_qty'], 'reservation_based_on': 'Qty'})
             sre.insert()
             sre.submit()
@@ -252,7 +342,7 @@ def execute(name):
         future = sum(s['qty'] for s in row['sources'] if not s['current'])
         if future or row['shortage_qty']:
             task = frappe.get_doc({'doctype': 'ToDo', 'reference_type': 'Supply Decision', 'reference_name': doc.name,
-                                  'priority': 'High', 'description': f"{row['document']}：计划未来到货分配{future:g}件；未覆盖缺口{row['shortage_qty']:g}件。请跟踪到货/催交；此为合成演示。"}).insert()
+                                  'priority': 'High', 'description': f"{row['document']}：计划未来到货分配{future:g}{ctx['stock_uom'] or '（库存单位未提供）'}；未覆盖缺口{row['shortage_qty']:g}{ctx['stock_uom'] or '（库存单位未提供）'}。请跟踪到货/催交；" + ('仅执行本次获批的现存自由库存预留，未新增采购。' if scope else '此为合成演示。')}).insert()
             tasks.append(task.name)
     doc.flags.executing = True
     doc.execution_result = json.dumps({'reservations': created, 'tasks': tasks, 'executed_by': frappe.session.user, 'executed_at': str(now_datetime())}, ensure_ascii=False)

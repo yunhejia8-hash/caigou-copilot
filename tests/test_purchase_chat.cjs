@@ -35,7 +35,9 @@ test('natural language goes to existing buying API with case context; no busines
     const {Hub} = environment(), h = sender(Hub); await h.send();
     assert.equal(h.calls.length,1); assert.equal(h.calls[0].method,'start');
     assert.equal(h.calls[0].args.module,'buying');
+    assert.equal(h.calls[0].args.supply_case,'CASE-001');
     assert.ok(h.calls[0].args.question.includes('CASE-001')); assert.ok(h.calls[0].args.question.endsWith('现在缺多少料？'));
+    assert.match(h.calls[0].args.question,/在结果卡选择方案、提交审批/);assert.match(h.calls[0].args.question,/合成场景只比较方案/);
 });
 test('missing model, empty input, restoring, and busy do not send', async () => {
     const {Hub} = environment();
@@ -45,7 +47,7 @@ test('missing model, empty input, restoring, and busy do not send', async () => 
 test('context counts toward server limit; original homepage questions are unchanged', async () => {
     const {Hub,messages} = environment(), h = sender(Hub,{text:'问'.repeat(2000)}); await h.send();
     assert.equal(h.calls.length,0); assert.equal(messages.length,1);
-    const home=sender(Hub,{caseName:'',text:'查看采购申请'});await home.send();assert.equal(home.calls[0].args.question,'查看采购申请');
+    const home=sender(Hub,{caseName:'',text:'查看采购申请'});await home.send();assert.equal(home.calls[0].args.question,'查看采购申请');assert.equal(home.calls[0].args.supply_case,undefined);
 });
 
 test('procurement context is opt-in and isolated from the original conversation', async () => {

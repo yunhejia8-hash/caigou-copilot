@@ -19,7 +19,7 @@
     if (frm.purchase_chat_loading) return;
     frm.purchase_chat_loading = true;
     try {
-      await frappe.require(['/assets/suke_ops/hub.js?v=procurement-approval-v1.js', '/assets/suke_ops/hub.css']);
+      await frappe.require(['/assets/suke_ops/hub.js?v=supply-decision-v1.js', '/assets/suke_ops/hub.css?v=supply-decision-v1.css']);
       // 资源加载期间可能切换或修改单据，不将旧上下文带到新页面。
       const route = frappe.get_route();
       if (frm.doc.name !== name || frm.is_dirty() ||
