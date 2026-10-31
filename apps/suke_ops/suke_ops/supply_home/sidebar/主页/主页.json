@@ -1,0 +1,27 @@
+{
+  "doctype": "Sidebar",
+  "name": "主页",
+  "title": "主页",
+  "module": "Supply Home",
+  "app": "erpnext",
+  "standard": 1,
+  "header_icon": "house",
+  "items": [
+    {
+      "type": "Link",
+      "label": "总控主页",
+      "link_type": "Page",
+      "link_to": "operations-hub",
+      "icon": "message-circle",
+      "is_default_module": 1
+    },
+    {
+      "type": "Link",
+      "label": "数据总览",
+      "link_type": "Page",
+      "link_to": "operations-data",
+      "icon": "layout-dashboard",
+      "is_default_module": 1
+    }
+  ]
+}

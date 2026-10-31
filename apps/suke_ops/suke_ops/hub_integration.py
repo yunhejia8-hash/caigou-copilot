@@ -24,6 +24,26 @@ def run():
         data = hub.dashboard()
         assert len(data['modules']) == 4 and all(row['metrics'] for row in data['modules'])
         checks.append('四模块面板来自实际数据库，指标和原生入口齐全')
+        from frappe.boot import get_module_sidebars
+        from frappe.desk.doctype.dock.dock import resolve_app_dock
+        sidebars = get_module_sidebars()
+        assert sidebars['主页']['module'] == 'Supply Home'
+        assert [row.get('link_to') for row in sidebars['主页']['items']] == ['operations-hub', 'operations-data']
+        for name in ['Buying', 'Selling', 'Stock', 'Manufacturing']:
+            slug = name.lower()
+            assert [row.get('link_to') for row in sidebars[name]['items']] == ['operations-' + slug, 'operations-data-' + slug]
+        assert next(row for row in resolve_app_dock('erpnext') if not row.get('hidden'))['link_to'] == '主页'
+        checks.append('主页为独立模块且位于导航首位；业务模块仅保留工作台和本模块数据')
+        assert len(hub.dashboard('control', 'data')['modules']) == 4
+        for module in hub.MODULE_DOCS:
+            with patch('suke_ops.hub.module_board', wraps=hub.module_board) as read_board:
+                scoped = hub.dashboard(module, 'data')
+                read_board.assert_called_once_with(module)
+            assert [row['module'] for row in scoped['modules']] == [module]
+            assert not scoped['cases'] and not scoped['decisions'] and not scoped['reports']
+            expected = {'buying': 'Purchase Order', 'selling': 'Sales Order', 'stock': 'Stock Entry', 'manufacturing': 'Work Order'}[module]
+            assert all(row['source_type'] == expected for row in scoped['approvals'])
+        checks.append('数据总览提供四模块；模块数据API只读取本模块，看板和审批不混入其他模块')
         case = frappe.get_doc('Supply Case', 'SUP-CASE-00001')
         po = frappe.get_doc('Purchase Order', case.purchase_order)
         offer = hub.draft_offer('stock', 'receive_purchase', po.name)
@@ -167,6 +187,47 @@ def run():
         assert not any(row['turn'] == report_turn.name for row in hub.latest_reports())
         frappe.set_user('Administrator')
         checks.append('模块完成分析自动进入总控汇报，用户隔离生效，库存看板提供质检数据')
+        stages = hub.dashboard('buying')['stages']
+        assert len(stages) == 6 and {row['module'] for row in stages} == set(hub.STAGE_DOCS)
+        assert next(row for row in stages if row['module'] == 'buying-order')['metrics'][1]['value'] == hub.module_board('buying')['metrics'][0]['value']
+        assert next(row for row in stages if row['module'] == 'buying-order')['metrics'][3]['value'] == hub.module_board('buying')['metrics'][1]['value']
+        assert all(row['columns'] and row['metrics'] for row in stages)
+        checks.append('采购六环节提供真实进度与对应明细，采购待收货指标与模块概览一致')
+        stage_conversation = str(uuid.uuid4())
+        for module in hub.STAGE_DOCS:
+            stage_turn = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': stage_conversation,
+                                        'agent_module': module, 'question': '读取本环节当前进度', 'state': 'queued'}).insert(ignore_permissions=True)
+            names.append(stage_turn.name)
+            frappe.db.commit()
+            def stage_provider(system, messages, tools):
+                assert '你是' + hub.runtime.MODULES[module] + ' Agent' in system
+                assert not any(tool['name'] in ('ask_module', 'offer_draft') for tool in tools)
+                allowed = next(tool for tool in tools if tool['name'] == 'read_record')['input_schema']['properties']['doctype']['enum']
+                assert set(allowed) == set(hub.STAGE_DOCS[module] + hub.SHARED_DOCS)
+                assert 'Sales Order' not in allowed
+                assert len(messages) == 1 or isinstance(messages[-1]['content'], list), '不应读取同会话其他专项的历史'
+                if len(messages) == 1:
+                    return {'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': 'stage', 'name': 'read_module_board', 'input': {}}]}
+                payload = json.loads(messages[-1]['content'][0]['content'])
+                assert payload['module'] == module and payload['columns']
+                return {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': module + '已核对真实环节数据，待负责人决策。'}]}
+            with patch('suke_ops.agent_runtime.request_model', stage_provider):
+                hub.run_turn(stage_turn.name)
+            assert hub.poll(stage_turn.name)['state'] == 'done'
+            restored_stage = hub.history(stage_conversation, module)
+            assert len(restored_stage) == 1 and restored_stage[0]['agent_module'] == module
+        assert set(hub.STAGE_DOCS).issubset({row['module'] for row in hub.latest_reports()})
+        checks.append('六专项Agent分别调用本环节工具、独立职责和历史，上报可被总控读取（模拟模型）')
+        try:
+            hub.read_record('buying-demand', 'Sales Order', 'not-allowed')
+            raise AssertionError('专项越权未被阻止')
+        except frappe.PermissionError:
+            pass
+        frappe.set_user(user)
+        assert all(metric['value'] is None for board in hub.dashboard('buying')['stages'] for metric in board['metrics'])
+        assert not any(row['module'] in hub.STAGE_DOCS for row in hub.latest_reports())
+        frappe.set_user('Administrator')
+        checks.append('采购专项工具越权被拒绝，无权限账号不泄漏统计或其他账号专项汇报')
         conversation = str(uuid.uuid4())
         for index in range(51):
             history_turn = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation,

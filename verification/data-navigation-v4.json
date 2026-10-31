@@ -1,0 +1,51 @@
+{
+  "modules": [
+    {
+      "module": "selling",
+      "url": "http://127.0.0.1:8081/desk/selling/operations-data-selling",
+      "scope": "仅显示销售相关数据",
+      "headings": [
+        "销售待跟进",
+        "销售待审批与已驳回",
+        "未完成业务单据",
+        "发货记录 ↗"
+      ],
+      "tabs": 0
+    },
+    {
+      "module": "stock",
+      "url": "http://127.0.0.1:8081/desk/stock/operations-data-stock",
+      "scope": "仅显示库存相关数据",
+      "headings": [
+        "库存待跟进",
+        "库存待审批与已驳回",
+        "现存库存明细",
+        "库存预留 ↗",
+        "质量检验 ↗",
+        "收货记录 ↗"
+      ],
+      "tabs": 0
+    },
+    {
+      "module": "manufacturing",
+      "url": "http://127.0.0.1:8081/desk/manufacturing/operations-data-manufacturing",
+      "scope": "仅显示生产相关数据",
+      "headings": [
+        "生产待跟进",
+        "生产待审批与已驳回",
+        "未完成业务单据",
+        "工序执行 ↗"
+      ],
+      "tabs": 0
+    }
+  ],
+  "navCheck": {
+    "inquiryLinks": 1,
+    "demandLinks": 1
+  },
+  "legacyRedirect": "/desk/selling/operations-data -> /desk/selling/operations-data-selling",
+  "overview": {
+    "url": "http://127.0.0.1:8081/desk/buying/operations-data",
+    "collapsedDetails": 4
+  }
+}
