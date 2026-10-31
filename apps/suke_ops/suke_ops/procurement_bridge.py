@@ -30,7 +30,7 @@ def demand_from(texts):
     return fields, ambiguities+invalid, engine
 
 
-def run(operation, texts, fields=None):
+def run(operation, texts, fields=None, image_quotes=None):
     if operation not in ('procurement_intake','procurement_compare','procurement_search'):
         raise ValueError('未授权采购工具')
     if fields is None:
@@ -57,9 +57,10 @@ def run(operation, texts, fields=None):
             return dict(result,errors=['搜索未返回可核验的来源，本轮不生成市场参考'])
         return dict(result,market_reference=quotes.output_text(out),sources=sources,reference_only=True)
     source = next((text for text in reversed(texts) if re.search(r'供应商[：:]',text)), None)
-    if not source:
+    if not source and not image_quotes:
         return dict(result, missing=['请粘贴供应商实际报价文字，各供应商用空行分隔'])
-    extracted = quotes.model_quotes(source) if quotes.model_enabled() else quotes.local_quotes(source)
+    extracted = (quotes.model_quotes(source) if quotes.model_enabled() else quotes.local_quotes(source)) if source else []
+    extracted += image_quotes or []
     rows=[]
     for index, raw in enumerate(extracted[:20]):
         q=quotes.validate_quote(raw)

@@ -19,7 +19,7 @@ QUOTE='供应商：A厂，物料：五层瓦楞包装箱，规格：400×300×25
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.patches=[patch.object(workflow,'duplicate_candidates',return_value=[]),
+        self.patches=[patch.dict(sys.modules, {'frappe':fake}),patch.object(workflow,'duplicate_candidates',return_value=[]),
                       patch.object(workflow,'create_pdf',side_effect=lambda wf,name:{'file':'PDF-'+name,'turn':name}),
                       patch.object(workflow.intake,'today',return_value=date(2026,10,31))]
         for p in self.patches:p.start()
@@ -102,3 +102,53 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(r['workflow']['phase'],'awaiting_confirmation')
     def test_application_metadata_endpoint_has_no_secret_file_path(self):
         r=workflow.document(self.ready());self.assertNotIn('file',r);self.assertNotIn('/private/',json.dumps(r))
+    def test_threshold_strictly_above_and_budget_independent(self):
+        for value, expected in [(9999.99,False),(10000,False),(10000.01,True)]:
+            r=workflow.approval_reminder(value,20000)
+            self.assertEqual(r['requires_escalation'],expected)
+            self.assertEqual(r['status'],'reminder_only')
+        self.assertTrue(workflow.approval_reminder(9000,8000)['over_budget'])
+        for value in ('NaN','Infinity',-1):
+            with self.assertRaises(ValueError):workflow.approval_reminder(value)
+    def test_image_cannot_skip_application_confirmation(self):
+        turn=self.turn('识别询价图片');turn.result=json.dumps({'quote_image':'PRIVATE'})
+        with self.assertRaises(ValueError):workflow.process(turn,self.ready())
+    def test_image_saved_then_explicit_comparison(self):
+        procurement_images=importlib.import_module('suke_ops.procurement_images')
+        wf=self.confirm(self.ready())
+        turn=self.turn('识别询价图片');turn.result=json.dumps({'quote_image':'PRIVATE'})
+        row={'supplier':'A','unit_price':25,'quantity':500}
+        with patch.object(procurement_images,'extract',return_value=[row]), patch.object(workflow.procurement_bridge,'run',return_value={'quotes':[{'quote':row}], 'comparable_count':1}) as bridge:
+            saved=workflow.process(turn,wf)
+            self.assertEqual(saved['workflow']['phase'],'quotations_ready')
+            self.assertEqual(bridge.call_args.args[0],'procurement_compare')
+        with patch.object(workflow.procurement_bridge,'run',return_value={'quotes':[{},{}],'comparable_count':2,'lowest_total':12500}) as bridge:
+            result=self.process('开始比价',saved['workflow'])
+        self.assertTrue(result['workflow']['approval_reminder']['requires_escalation'])
+        self.assertEqual(bridge.call_args.kwargs['image_quotes'],[row])
+        edited=self.process('预算改为3000元',result['workflow'])
+        self.assertNotIn('image_quotes',edited['workflow'])
+        self.assertNotIn('approval_reminder',edited['workflow'])
+    def test_private_upload_owner_and_remote_rejected(self):
+        procurement_images=importlib.import_module('suke_ops.procurement_images')
+        f=MagicMock();f.session.user='alice';f.PermissionError=PermissionError
+        f.throw.side_effect=lambda *a: (_ for _ in ()).throw(PermissionError())
+        with patch.object(procurement_images,'frappe',f):
+            for owner,private,url in [('bob',1,'/private/files/a.png'),('alice',0,'/files/a.png'),('alice',1,'https://example.com/a.png')]:
+                f.get_doc.return_value=SimpleNamespace(owner=owner,is_private=private,is_folder=0,file_url=url)
+                with self.assertRaises(PermissionError):procurement_images.validate_upload('FILE')
+            f.get_doc.return_value=SimpleNamespace(owner='alice',is_private=1,is_folder=0,file_url='/private/files/a.png',file_size=1)
+            self.assertEqual(procurement_images.validate_upload('FILE').owner,'alice')
+    def test_image_failure_preserves_saved_quotes_and_duplicate_does_not_call_api(self):
+        procurement_images=importlib.import_module('suke_ops.procurement_images')
+        wf=self.confirm(self.ready());wf['quote_images']=['OLD']
+        turn=self.turn('识别询价图片');turn.result=json.dumps({'quote_image':'OLD'})
+        with patch.object(procurement_images,'extract') as api:
+            r=workflow.process(turn,wf)
+            api.assert_not_called()
+            self.assertIn('已录入',r['answer'])
+        turn.result=json.dumps({'quote_image':'NEW'})
+        with patch.object(procurement_images,'extract',side_effect=ValueError('图片模糊')):
+            r=workflow.process(turn,wf)
+        self.assertIn('图片模糊',r['answer'])
+        self.assertEqual(r['workflow'],wf)

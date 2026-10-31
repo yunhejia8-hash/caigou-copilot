@@ -73,6 +73,20 @@ frappe.SupplyHub = class {
             this.onNavigate();
             frappe.set_route(docname ? ['Form', doctype, docname] : ['List', doctype]);
         });
+        this.host.on('click', '[data-quote-image]', () => {
+            if (this.busy || this.restoring) return;
+            const conversation = this.conversation;
+            const module = this.module;
+            new frappe.ui.FileUploader({
+                allow_multiple: false, make_attachments_public: false,
+                disable_file_browser: true, allow_web_link: false,
+                restrictions: {allowed_file_types: ['.png', '.jpg', '.jpeg', '.webp'], max_file_size: 10 * 1024 * 1024},
+                on_success: file => {
+                    if (conversation !== this.conversation || module !== this.module) return frappe.msgprint('对话已切换，请在原询价对话重新选择图片。');
+                    this.send('识别询价图片', {quote_image: file.name});
+                }
+            });
+        });
         this.host.on('click', '[data-start-comparison]', () => this.send('开始比价'));
         this.host.on('click', '[data-confirm-application]', (event) => {
             this.send('确认申请 ' + event.currentTarget.dataset.confirmApplication + ' 第' + event.currentTarget.dataset.revision + '版');
@@ -212,12 +226,12 @@ frappe.SupplyHub = class {
         const current = latest?.id === app.id && latest?.revision === app.revision;
         const active = latest?.id === app.id && latest?.revision === app.revision && latest?.phase === 'awaiting_confirmation';
         const safe = url => typeof url === 'string' && /^\/api\/method\/suke_ops\.procurement_workflow\.application_pdf\?/.test(url);
-        return `<section class="hub-application"><div><strong>采购需求申请表</strong><span>${this.esc(app.status)}</span></div><small>${this.esc(app.id)} · 第${Number(app.revision)}版</small><div class="hub-application-actions">${safe(app.preview_url) ? `<a href="${this.esc(app.preview_url)}" target="_blank" rel="noopener noreferrer">预览 PDF ↗</a>` : ''}${safe(app.download_url) ? `<a href="${this.esc(app.download_url)}">下载 PDF ↓</a>` : ''}${current && latest.phase === 'quotations_ready' ? '<button type="button" data-start-comparison>开始比价</button>' : ''}${active && safe(app.preview_url) ? `<button type="button" data-confirm-application="${this.esc(app.id)}" data-revision="${Number(app.revision)}">确认申请，进入询价</button>` : ''}</div></section>`;
+        return `<section class="hub-application"><div><strong>采购需求申请表</strong><span>${this.esc(app.status)}</span></div><small>${this.esc(app.id)} · 第${Number(app.revision)}版</small><div class="hub-application-actions">${safe(app.preview_url) ? `<a href="${this.esc(app.preview_url)}" target="_blank" rel="noopener noreferrer">预览 PDF ↗</a>` : ''}${safe(app.download_url) ? `<a href="${this.esc(app.download_url)}">下载 PDF ↓</a>` : ''}${current && ['inquiry','quotations_ready','compared'].includes(latest.phase) ? '<button type="button" data-quote-image>发送报价图片</button>' : ''}${current && latest.phase === 'quotations_ready' ? '<button type="button" data-start-comparison>开始比价</button>' : ''}${active && safe(app.preview_url) ? `<button type="button" data-confirm-application="${this.esc(app.id)}" data-revision="${Number(app.revision)}">确认申请，进入询价</button>` : ''}</div></section>`;
     }
     procurementEvidence(turn) {
         return (turn.procurement || []).map(entry => {
             const result = entry.result || {};
-            if (result.quotes) return `<div class="hub-table-scroll"><table class="hub-quote-comparison"><thead><tr><th>供应商</th><th>含税到仓总额</th><th>待核对项</th></tr></thead><tbody>${result.quotes.map(row => `<tr><td>${this.esc(row.quote?.supplier || '待明确')}</td><td>${row.total === null ? '待明确' : '¥' + Number(row.total).toLocaleString('zh-CN',{minimumFractionDigits:2})}</td><td>${this.esc((row.issues || []).join('；') || '条件齐全')}</td></tr>`).join('')}</tbody></table></div>`;
+            if (result.quotes) return `<div class="hub-table-scroll"><table class="hub-quote-comparison"><thead><tr><th>供应商 / 物料规格</th><th>数量 / 单价</th><th>税运 / 交期 / 有效期 / 付款</th><th>含税到仓总额</th><th>待核对项</th></tr></thead><tbody>${result.quotes.map(row => `<tr><td>${this.esc(row.quote?.supplier || '待明确')}<br>${this.esc(row.quote?.material || '待明确')} ${this.esc(row.quote?.spec || '')}</td><td>${this.esc(row.quote?.quantity ?? '待明确')} ${this.esc(row.quote?.unit || '')}<br>¥${this.esc(row.quote?.unit_price ?? '待明确')}</td><td>${this.esc(row.quote?.tax || '待明确')} / 运费 ${this.esc(row.quote?.freight ?? '待明确')}<br>${this.esc(row.quote?.delivery || '待明确')} / ${this.esc(row.quote?.valid_until || '待明确')}<br>${this.esc(row.quote?.payment || '待明确')}</td><td>${row.total === null ? '待明确' : '¥' + Number(row.total).toLocaleString('zh-CN',{minimumFractionDigits:2})}</td><td>${this.esc((row.issues || []).join('；') || '条件齐全')}</td></tr>`).join('')}</tbody></table></div>`;
             if (result.sources) return `<details><summary>网上参考价与来源</summary><p>${this.esc(result.market_reference || '')}</p>${Object.entries(result.sources).filter(([url]) => /^https?:\/\//.test(url)).map(([url,title]) => `<a href="${this.esc(url)}" target="_blank" rel="noopener noreferrer">${this.esc(title)}</a>`).join('<br>')}</details>`;
             return '';
         }).join('');
@@ -298,7 +312,7 @@ frappe.SupplyHub = class {
     renderBusy() {
         this.host.find('.hub-send').prop('disabled', this.restoring || this.busy || !this.data?.model_ready).text(this.busy ? '分析中…' : '发送 ↑');
         this.host.find('.hub-new').prop('disabled', this.restoring || this.busy);
-        this.host.find('[data-confirm-application],[data-start-comparison]').prop('disabled',this.restoring || this.busy);
+        this.host.find('[data-confirm-application],[data-start-comparison],[data-quote-image]').prop('disabled',this.restoring || this.busy);
         this.host.find('[data-prompt], [data-live-discussion]').prop('disabled', this.restoring || this.busy || !this.data?.model_ready);
     }
     async send(prompt, scenario = {}) {

@@ -134,13 +134,33 @@ def process(turn, prior=None):
         return None
     wf = json.loads(json.dumps(prior)) if prior else {'id':'PA-'+str(intake.today()).replace('-','')+'-'+turn.name.upper(),
          'revision':0,'fields':{},'phase':'needs_info','preflight':{},'pdf':None}
+    image = json.loads(getattr(turn, 'result', None) or '{}').get('quote_image')
+    if image:
+        guard(wf, 'procurement_search')
+        from suke_ops.procurement_images import extract
+        if image in wf.get('quote_images', []):
+            return pack(wf, '这张图片已录入，请继续上传其他供应商报价或开始比价。')
+        try:
+            rows = extract(image)
+        except ValueError as error:
+            return pack(wf, '图片识别未完成：'+str(error))
+        if not rows:
+            return pack(wf, '图片中未识别到报价，请上传清晰的报价单或补充文字。')
+        if len(wf.get('image_quotes', [])) + len(rows) > 20:
+            return pack(wf, '最多支持20份报价，请整理后用完整报价文字替换。')
+        wf['quote_images'] = wf.get('quote_images', []) + [image]
+        wf['image_quotes'] = wf.get('image_quotes', []) + rows
+        wf.update(phase='quotations_ready', quote_turn=turn.name)
+        wf.pop('approval_reminder', None)
+        preview = procurement_bridge.run('procurement_compare', [], fields=wf['fields'], image_quotes=wf['image_quotes'])
+        return pack(wf, '图片报价已提取，请核对表格；识别错误请粘贴完整新版报价替换。确认后点击“开始比价”。', [{'tool':'quote_image_extraction','result':preview}])
     confirmation = re.fullmatch(r'确认申请\s+([A-Za-z0-9-]+)\s+第(\d+)版',text)
     if confirmation:
         if (confirmation[1] != wf['id'] or int(confirmation[2]) != wf['revision'] or wf['phase'] != 'awaiting_confirmation' or not wf.get('pdf')):
             return pack(wf,'请先查看并确认当前版本的申请表，旧版本不能进入询价。')
         wf['phase'] = 'inquiry'
         wf['confirmed_at'] = str(now_datetime())
-        return pack(wf,'申请已确认，进入询价。请粘贴这笔申请的供应商报价，各供应商用空行分隔。')
+        return pack(wf,'申请已确认，进入询价。请粘贴供应商报价（用空行分隔），或点击“发送报价图片”。')
     preamble = re.split(r'供应商[：:]',text,maxsplit=1)[0].strip()
     patch, issues = {}, []
     if preamble and not re.search(r'^(请)?(再|重新|重试)?(查价|比价|确认申请|预览|下载)',preamble):
@@ -161,6 +181,8 @@ def process(turn, prior=None):
         check = preflight(fields, issues, duplicate_candidates(wf['id']))
         wf.update(fields=fields,preflight=check,pdf=None,phase=check['state'])
         wf.pop('confirmed_at',None)
+        for key in ('quote_source','image_quotes','quote_images','approval_reminder'):
+            wf.pop(key,None)
         if check['state'] in ('passed','review'):
             wf.update(revision=wf['revision']+1,phase='awaiting_confirmation',generated_at=str(now_datetime()))
             wf['pdf'] = create_pdf(wf,turn.name)
@@ -175,17 +197,23 @@ def process(turn, prior=None):
         return pack(wf,'申请表已生成，请先预览并确认，再输入询价结果。')
     if re.search(r'供应商[：:]',text):
         # Save inquiry first; a separate explicit step starts comparison.
+        wf.pop('image_quotes',None)
+        wf.pop('quote_images',None)
+        wf.pop('approval_reminder',None)
         wf.update(quote_source=text,quote_turn=turn.name,phase='quotations_ready')
         return pack(wf,'询价结果已保存。请核对后点击“开始比价”。')
     if text == '开始比价':
-        if wf['phase'] != 'quotations_ready' or not wf.get('quote_source'):
+        if wf['phase'] != 'quotations_ready' or not (wf.get('quote_source') or wf.get('image_quotes')):
             return pack(wf,'请先录入本笔申请的供应商报价，再开始比价。')
-        result = procurement_bridge.run('procurement_compare',[wf['quote_source']],fields=wf['fields'])
+        result = procurement_bridge.run('procurement_compare',[wf.get('quote_source','')],fields=wf['fields'], **({'image_quotes':wf['image_quotes']} if wf.get('image_quotes') else {}))
         wf['phase'] = 'compared' if result.get('comparable_count',0)>=2 else 'quotations_ready'
         answer = f"已整理 {len(result.get('quotes',[]))} 份报价。"
         if result.get('lowest_total') is not None:
-            answer += f"同口径最低到仓总额 {result['lowest_total']:,.2f} 元。请核对条件后确认采购方案。"
+            answer += f"同口径最低到仓总额 {result['lowest_total']:,.2f} 元。"
+            wf['approval_reminder'] = approval_reminder(result['lowest_total'], wf['fields'].get('budget'))
+            answer += wf['approval_reminder']['message']
         else:
+            wf.pop('approval_reminder',None)
             answer += '报价条件尚未齐全，请补充标注项后再比价。'
         return pack(wf,answer,[{'tool':'procurement_compare','result':result}])
     if re.search('网上|联网|查价',text):
@@ -193,6 +221,20 @@ def process(turn, prior=None):
         return pack(wf,'已查询网上参考价，请核对规格和来源。' if result.get('sources') else '本次未取得可核验参考价，请稍后重试。',
                     [{'tool':'procurement_search','result':result}])
     return pack(wf,'当前处于询价阶段，请提供本笔申请的供应商报价。')
+
+
+def approval_reminder(total, budget=None):
+    from decimal import Decimal
+    amount = Decimal(str(total))
+    if not amount.is_finite() or amount < 0:
+        raise ValueError('无效采购金额')
+    required = amount > Decimal('10000')
+    message = '提醒：本方案金额超过10,000元，需向上级报批。' if required else '本方案金额未超过10,000元，无需按此标准上报。'
+    over_budget = budget is not None and amount > Decimal(str(budget))
+    if over_budget:
+        message += '同时超过申请预算，请调整方案或申请追加预算。'
+    return {'threshold':10000,'amount':float(amount),'requires_escalation':required,'over_budget':over_budget,
+            'status':'reminder_only','message':message+'（仅作提醒，未自动审批。）'}
 
 
 def guard(context, operation):

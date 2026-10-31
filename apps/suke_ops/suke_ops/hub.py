@@ -288,13 +288,20 @@ def owned_turn(name):
 
 
 @frappe.whitelist(methods=['POST'])
-def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None):
+def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, quote_image=None):
     require_user()
     check_module(module, control=True)
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
         frappe.throw('请输入 1–2000 字的问题。')
     if not runtime.configured():
         frappe.throw('尚未配置模型服务；面板和手动功能仍可使用。')
+    if quote_image:
+        from suke_ops.procurement_images import validate_upload
+        from suke_ops.procurement_workflow import previous_workflow, guard
+        if module not in ('buying','buying-demand','buying-inquiry','buying-comparison'):
+            frappe.throw('请在采购询价对话中发送图片。')
+        guard(previous_workflow(conversation), 'procurement_search')
+        validate_upload(quote_image)
     scenario = None
     if scenario_id is not None:
         from suke_ops.live_discussion import evidence
@@ -340,7 +347,7 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         frappe.db.set_value('Agent Turn', row.name, {'state': 'failed', 'answer': '分析超时，请重新发送。'})
     doc = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation, 'request_key': key,
                          'agent_module': module, 'question': question.strip(), 'state': 'queued',
-                         'result': json.dumps({'scenario': scenario}, ensure_ascii=False) if scenario else None}).insert(ignore_permissions=True)
+                         'result': json.dumps({'scenario': scenario, 'quote_image': quote_image}, ensure_ascii=False)}).insert(ignore_permissions=True)
     frappe.enqueue('suke_ops.hub.run_turn', queue='long', timeout=900, enqueue_after_commit=True,
                    job_id='agent-' + doc.name, name=doc.name)
     return {'name': doc.name, 'conversation': conversation}

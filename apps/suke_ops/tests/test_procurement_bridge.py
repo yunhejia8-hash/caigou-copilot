@@ -46,6 +46,15 @@ class BridgeTests(unittest.TestCase):
     def test_search_followup_keeps_prior_demand(self):
         fields, errors, engine=bridge.demand_from([DEMAND+'\n\n'+QUOTE,'请重新调用后台比价工具，比较刚才两家报价。','请调用网上查价功能，查刚才500个、400×300×250mm五层瓦楞包装箱的公开参考价。'])
         self.assertEqual(fields['needed_by'],'2026-11-15');self.assertEqual(engine,'local');self.assertFalse(errors)
+    def test_image_quotes_skip_second_model_extraction_and_use_original_rules(self):
+        rows=bridge.quotes.local_quotes(QUOTE+'\n\n'+QUOTE.replace('A厂','B厂').replace('3.5','25'))
+        with patch.object(bridge.quotes,'model_quotes',side_effect=AssertionError('do not extract again')):
+            r=bridge.run('procurement_compare',[],fields=FIELDS,image_quotes=rows)
+        self.assertEqual(r['lowest_total'],1850)
+        self.assertEqual(r['quotes'][1]['total'],12600)
+        rows[0]['freight']=None
+        r=bridge.run('procurement_compare',[],fields=FIELDS,image_quotes=rows)
+        self.assertIsNone(r['lowest_total'])
     def test_arbitrary_tool_blocked(self):
         with self.assertRaises(ValueError):bridge.run('place_order',[DEMAND])
 
