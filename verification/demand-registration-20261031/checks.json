@@ -1,0 +1,129 @@
+{
+  "passed": 30,
+  "total": 30,
+  "before_registered": 3,
+  "after_registered": 5,
+  "model": "deepseek-v4-flash",
+  "checks": [
+    {
+      "name": "原始结果未覆盖",
+      "passed": true
+    },
+    {
+      "name": "L1完成且仅新增一张需求草稿",
+      "passed": true
+    },
+    {
+      "name": "L1物料数量单位正确",
+      "passed": true
+    },
+    {
+      "name": "L1公司仓库日期正确",
+      "passed": true
+    },
+    {
+      "name": "L1需求子Agent完整回报",
+      "passed": true
+    },
+    {
+      "name": "L1返回真实需求单号",
+      "passed": true
+    },
+    {
+      "name": "L2完成且仅新增一张需求草稿",
+      "passed": true
+    },
+    {
+      "name": "L2物料数量单位正确",
+      "passed": true
+    },
+    {
+      "name": "L2公司仓库日期正确",
+      "passed": true
+    },
+    {
+      "name": "L2需求子Agent完整回报",
+      "passed": true
+    },
+    {
+      "name": "L2返回真实需求单号",
+      "passed": true
+    },
+    {
+      "name": "L3完成且仅新增一张需求草稿",
+      "passed": true
+    },
+    {
+      "name": "L3物料数量单位正确",
+      "passed": true
+    },
+    {
+      "name": "L3公司仓库日期正确",
+      "passed": true
+    },
+    {
+      "name": "L3需求子Agent完整回报",
+      "passed": true
+    },
+    {
+      "name": "L3返回真实需求单号",
+      "passed": true
+    },
+    {
+      "name": "L4完成且仅新增一张需求草稿",
+      "passed": true
+    },
+    {
+      "name": "L4物料数量单位正确",
+      "passed": true
+    },
+    {
+      "name": "L4公司仓库日期正确",
+      "passed": true
+    },
+    {
+      "name": "L4需求子Agent完整回报",
+      "passed": true
+    },
+    {
+      "name": "L4返回真实需求单号",
+      "passed": true
+    },
+    {
+      "name": "L5完成且仅新增一张需求草稿",
+      "passed": true
+    },
+    {
+      "name": "L5物料数量单位正确",
+      "passed": true
+    },
+    {
+      "name": "L5公司仓库日期正确",
+      "passed": true
+    },
+    {
+      "name": "L5需求子Agent完整回报",
+      "passed": true
+    },
+    {
+      "name": "L5返回真实需求单号",
+      "passed": true
+    },
+    {
+      "name": "泛称物料仍澄清且不猜测建单",
+      "passed": true
+    },
+    {
+      "name": "最新仅分析指令不创建单据",
+      "passed": true
+    },
+    {
+      "name": "短句沿用确认字段且同会话不重复建单",
+      "passed": true
+    },
+    {
+      "name": "真实数据库规则回归",
+      "passed": true
+    }
+  ]
+}

@@ -571,7 +571,8 @@ def run_turn(name):
             from suke_ops.parallel_work import run_parallel
             jobs, prepared = [], {}
             remaining = len({args['module'] for args in requests} - {row['module'] for row in module_results})
-            for args in requests:
+            # 先分配登记任务，避免旁支查询耗尽主任务的建单与回报预算。
+            for args in sorted(requests, key=lambda args: args['module'] not in demand.MODULES):
                 target = args['module']
                 previous_result = next((row for row in module_results if row['module'] == target), None)
                 if previous_result:
@@ -587,13 +588,15 @@ def run_turn(name):
                     continue
                 tool_budget[0] -= 1  # Program pre-read is a real read, not a free model tool.
                 # 调用线程分配子预算，需求最多5轮，总控预留2轮；完成后归还剩余额度。
-                quota = min(5 if target in demand.MODULES else 4, max(0, budget[0]-2) // max(1, remaining))
+                available = max(0, budget[0]-2)
+                quota = min(5, available) if target in demand.MODULES else min(4, available // max(1, remaining))
                 tools_quota = min(10, tool_budget[0] // max(1, remaining))
                 remaining -= 1
                 budget[0] -= quota
                 tool_budget[0] -= tools_quota
                 evidence = dispatch(target, 'read_module_board', {})
-                jobs.append({'module': target, 'question': args['question'], 'evidence': evidence,
+                jobs.append({'module': target, 'question': runtime.delegation_question(turn.question, args['question']),
+                             'history': messages, 'evidence': evidence,
                              'budget': [quota], 'tool_budget': [tools_quota], 'specs': module_tools(target)})
                 audit(target, 'started', '正在核查；独立部门同时进行。')
 
@@ -601,7 +604,7 @@ def run_turn(name):
                 started, child_trace = time.monotonic(), []
                 try:
                     answer = runtime.respond(job['module'], job['question'] + '\n向总控用最多3条短句汇报关键发现、依据和待确认事项，不重复背景。',
-                        [], job['specs'], lambda *args: call('tool', *args), child_trace,
+                        job['history'], job['specs'], lambda *args: call('tool', *args), child_trace,
                         budget=job['budget'], tool_budget=job['tool_budget'], initial_evidence=job['evidence'])
                     result = {'module': job['module'], 'status': 'done', 'answer': answer}
                 except Exception:

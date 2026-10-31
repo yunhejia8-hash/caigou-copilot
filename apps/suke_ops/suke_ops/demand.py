@@ -1,6 +1,7 @@
 """把用户采购需求保存为真实物料需求单草稿；不提交、不审批、不选择供应商。"""
 import hashlib
 import json
+import re
 from datetime import date
 
 import frappe
@@ -54,12 +55,20 @@ def create(module, turn, company, schedule_date, items, current_documents=()):
     frappe.get_doc('Company', company).check_permission('read')
     if not frappe.has_permission('Material Request', 'create'):
         frappe.throw('没有创建物料需求单的权限。', frappe.PermissionError)
+    previous = frappe.get_list('Agent Turn', filters={'owner': turn.owner, 'conversation': turn.conversation},
+                               fields=['question', 'result'], limit_page_length=0)
+    user_questions = [turn.question or '', *(record.question or '' for record in previous)]
     rows = []
     for row in items:
         item = frappe.get_doc('Item', row['item_code'])
         item.check_permission('read')
         if item.disabled or not item.is_purchase_item or item.has_variants:
             raise RuntimeError('所选物料不可采购，请选择启用的可采购明细物料。')
+        # 只认可本账号会话里的用户选择，不把模型候选或旧助手回答当成确认。
+        code_pattern = r'(?<![A-Za-z0-9_-])' + re.escape(item.name) + r'(?![A-Za-z0-9_-])'
+        unique_name = bool(item.item_name) and frappe.db.count('Item', {'item_name': item.item_name, 'disabled': 0, 'has_variants': 0}) == 1
+        if not any(re.search(code_pattern, question, re.IGNORECASE) or (unique_name and item.item_name in question) for question in user_questions):
+            raise RuntimeError('物料编码或完整名称尚未由用户选定，请先确认具体物料；候选数据和助手建议不能代替用户选择。')
         warehouse = frappe.get_doc('Warehouse', row['warehouse'])
         warehouse.check_permission('read')
         if warehouse.company != company or warehouse.is_group or warehouse.disabled:
@@ -74,7 +83,6 @@ def create(module, turn, company, schedule_date, items, current_documents=()):
     payload = {'company': company, 'schedule_date': schedule_date,
                'items': sorted(rows, key=lambda row: json.dumps(row, sort_keys=True))}
     fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    previous = frappe.get_list('Agent Turn', filters={'owner': turn.owner, 'conversation': turn.conversation}, fields=['result'], limit_page_length=0)
     documents = [*current_documents, *(doc for record in previous
                  for doc in json.loads(record.result or '{}').get('documents', []))]
     for document in documents:
