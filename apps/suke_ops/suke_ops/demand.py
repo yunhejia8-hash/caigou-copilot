@@ -42,6 +42,38 @@ def context(search):
             'note': '候选项有数量上限；名称不唯一时追问，数量和需求日期不得推测。默认按库存单位登记。'}
 
 
+def selected_by_user(item, unique_name, questions):
+    """从新到旧判断有效选择；改选、否定和待选不能被更早的选择覆盖。"""
+    code = r'(?<![A-Za-z0-9_-])' + re.escape(item.name) + r'(?![A-Za-z0-9_-])'
+    target = code + ('|' + re.escape(item.item_name) if unique_name else '')
+    for question in questions:
+        if re.search(r'(?:只|仅)(?:做)?(?:分析|核算|查询|比较)|(?:不要|不|暂不|无需|别)(?:再)?(?:创建|登记|生成|建单)', question):
+            return False
+        changes = [match for match in re.finditer(r'改选|改为|改成|换成|重新选择', question)
+                   if not re.search(r'(?:数量|预算|日期|规格|仓库|收货仓|用途|单位|单价|到货)(?:调整)?$', question[:match.start()])]
+        active = question[changes[-1].start():] if changes else question
+        if changes and re.search(r'保留\s*(?:' + target + ')', question[:changes[-1].start()], re.I):
+            active = question
+        if re.search(r'取消.{0,12}(?:选择|需求)|不再.{0,8}(?:上轮|刚才|原物料)', active) and not re.search(target, active, re.I):
+            return False
+        if re.search(target, active, re.I):
+            if re.search(r'候选|还是|或者|比较|对比', active):
+                return False
+            for clause in re.split(r'[，,。；;\n]', active):
+                match = re.search(target, clause, re.I)
+                if not match:
+                    continue
+                if re.search(r'不(?:要|选|用|采购|买)|不是|排除|取消', clause[:match.start()]):
+                    return False
+                if re.search(r'^(?:暂时)?(?:不要|不买|取消|不选|排除)', clause[match.end():].strip()):
+                    return False
+            return bool(re.search(r'采购|购买|需要|买|选定|选择|改选|登记|创建|确认', active))
+        # 当前明确指定了另一物料时，不能回退到更早的历史选择。
+        if changes or re.search(r'(?:采购|购买|买|选定|选择|物料(?:编码|名称)?[：:])\s*(?:\d+(?:\.\d+)?\s*(?:Nos|个|件|台|套|盒|包|米)\s*)?(?!需求|数量|预算|日期|单位)[A-Za-z\u4e00-\u9fff]', active):
+            return False
+    return False
+
+
 def create(module, turn, company, schedule_date, items, current_documents=()):
     if module not in MODULES:
         frappe.throw('该模块不能创建物料需求单。', frappe.PermissionError)
@@ -55,8 +87,13 @@ def create(module, turn, company, schedule_date, items, current_documents=()):
     frappe.get_doc('Company', company).check_permission('read')
     if not frappe.has_permission('Material Request', 'create'):
         frappe.throw('没有创建物料需求单的权限。', frappe.PermissionError)
-    previous = frappe.get_list('Agent Turn', filters={'owner': turn.owner, 'conversation': turn.conversation},
-                               fields=['question', 'result'], limit_page_length=0)
+    if re.search(r'(?:只|仅)(?:做)?(?:分析|核算|查询|比较)|(?:不要|不|暂不|无需|别)(?:再)?(?:创建|登记|生成|建单)', turn.question or ''):
+        raise RuntimeError('本轮仅分析或已撤销建单授权，未创建需求单。')
+    filters = {'owner': turn.owner, 'conversation': turn.conversation}
+    if getattr(turn, 'creation', None):
+        filters['creation'] = ['<', turn.creation]
+    previous = frappe.get_list('Agent Turn', filters=filters, fields=['question', 'result'],
+                               order_by='creation desc, name desc', limit_page_length=0)
     user_questions = [turn.question or '', *(record.question or '' for record in previous)]
     rows = []
     for row in items:
@@ -65,9 +102,8 @@ def create(module, turn, company, schedule_date, items, current_documents=()):
         if item.disabled or not item.is_purchase_item or item.has_variants:
             raise RuntimeError('所选物料不可采购，请选择启用的可采购明细物料。')
         # 只认可本账号会话里的用户选择，不把模型候选或旧助手回答当成确认。
-        code_pattern = r'(?<![A-Za-z0-9_-])' + re.escape(item.name) + r'(?![A-Za-z0-9_-])'
         unique_name = bool(item.item_name) and frappe.db.count('Item', {'item_name': item.item_name, 'disabled': 0, 'has_variants': 0}) == 1
-        if not any(re.search(code_pattern, question, re.IGNORECASE) or (unique_name and item.item_name in question) for question in user_questions):
+        if not selected_by_user(item, unique_name, user_questions):
             raise RuntimeError('物料编码或完整名称尚未由用户选定，请先确认具体物料；候选数据和助手建议不能代替用户选择。')
         warehouse = frappe.get_doc('Warehouse', row['warehouse'])
         warehouse.check_permission('read')
