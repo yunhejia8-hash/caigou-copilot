@@ -101,6 +101,8 @@ def install():
     install_procurement()
     from suke_ops.finance_sync.setup import install as install_finance
     install_finance()
+    from suke_ops.supply_practice import install as install_practice
+    install_practice()
     frappe.reload_doc('buying', 'page', 'operations_hub')
     customize_navigation()
     repair_existing_reservations()

@@ -210,6 +210,190 @@ class HubResolutionTests(unittest.TestCase):
                             for row in result['events']))
         self.assertIn('resolution', result)  # Model failure does not hide the verified case.
 
+    def prepare_practice_endpoint(self):
+        """Only Agent Turn insert is supported; any ERP write/model request fails."""
+        self.inserted = []
+        self.practice_case = NS(name='PRACTICE-CASE', company='独立虚拟公司', owner='seed-admin',
+                                creation='2026-11-01 08:00:00', modified_by='warehouse-user',
+                                modified='2026-11-01 08:30:00')
+        self.practice_summary = {'registered': True, 'dataset_id': 'registered-local-1',
+            'scope': 'isolated_erp', 'label': '本地连接器测试',
+            'metrics': [{'label': '自由库存', 'value': 192, 'unit': '件'}],
+            'sources': [{'doctype': 'Supply Case', 'name': self.practice_case.name, 'label': '供应异常'}]}
+        self.practice = NS(current_case=Mock(return_value=self.practice_case.name),
+                           summary=Mock(side_effect=lambda case: deepcopy(self.practice_summary)),
+                           seed=Mock(side_effect=AssertionError('Seeding is not an endpoint action')),
+                           install=Mock(side_effect=AssertionError('Installation is not an endpoint action')))
+        self.practice_api = ModuleType('suke_ops.api')
+        self.practice_api.read_case = Mock(return_value=self.practice_case)
+        self.practice_api.execute = Mock(side_effect=AssertionError('Opening cannot execute a plan'))
+        for patcher in [patch.object(suke_ops, 'supply_practice', self.practice, create=True),
+                        patch.dict(sys.modules, {'suke_ops.api': self.practice_api}),
+                        patch.object(self.hub.runtime, 'configured', return_value=False),
+                        patch.object(self.hub.runtime, 'respond', side_effect=AssertionError('Model must not run'))]:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.decisions.build.return_value = {'kind': 'sandbox', 'state': 'needs_choice',
+            'case': {'name': self.practice_case.name, 'is_simulation': True},
+            'sandbox': {key: self.practice_summary[key] for key in ('registered', 'dataset_id', 'scope', 'label')},
+            'can': {'choose': True, 'approve': False, 'execute': False}}
+        self.f.get_all = Mock(return_value=[])
+        self.f.db.get_value = lambda doctype, filters, field: next((doc.name for doc in self.docs.values()
+            if all(getattr(doc, key, None) == value for key, value in filters.items())), None)
+        self.hub.now_datetime = lambda: '2026-11-01 09:00:00'
+
+        def get_doc(doctype, name=None):
+            if not isinstance(doctype, dict):
+                self.assertEqual(doctype, 'Agent Turn')
+                return self.docs[name]
+            self.assertEqual(doctype['doctype'], 'Agent Turn', 'The endpoint must not create ERP documents')
+            doc = NS(**doctype)
+
+            def insert(ignore_permissions=False):
+                self.assertTrue(ignore_permissions)
+                doc.name = 'PRACTICE-TURN-' + str(len(self.inserted) + 1)
+                self.docs[doc.name] = doc
+                self.inserted.append(doc)
+                return doc
+            doc.insert = insert
+            return doc
+        self.f.get_doc = get_doc
+
+    def open_practice(self, **overrides):
+        return self.hub.open_supply_practice(**{
+            'conversation': 'b3ecf00f-1b31-4e90-9b1f-72ed3b8eaa01',
+            'request_id': '7d848b7c-8cf9-46bd-9e13-7b2b3605c101', **overrides})
+
+    def test_registered_practice_returns_completed_owned_turn_and_actual_read_provenance_without_model(self):
+        self.prepare_practice_endpoint()
+        status = self.hub.chat_status()
+        self.assertFalse(status['model_ready'])
+        self.assertTrue(status['practice_available'])
+        response = self.open_practice()
+        self.assertEqual(response['state'], 'done')
+        self.assertEqual(response['agent_module'], 'control')
+        self.assertEqual(response['mode'], '程序核算 · 本地虚拟数据')
+        self.assertEqual(response['resolution']['kind'], 'sandbox')
+        self.assertEqual(response['practice']['case_name'], self.practice_case.name)
+        self.assertEqual(response['practice']['company'], self.practice_case.company)
+        self.assertEqual(response['practice']['metrics'][0]['value'], 192)  # Live value, not seeded 200.
+        self.assertEqual(len(self.inserted), 1)
+        saved = self.inserted[0]
+        self.assertEqual(saved.owner, 'buyer')
+        self.assertEqual(saved.conversation, 'b3ecf00f-1b31-4e90-9b1f-72ed3b8eaa01')
+        self.assertEqual(json.loads(saved.result)['resolution_context']['explicit_case'], self.practice_case.name)
+        event = response['events'][0]
+        self.assertEqual(event['query'], {'doctype': 'Supply Case', 'name': self.practice_case.name,
+                                        'scope': 'on_hand_only'})
+        source = json.loads(event['result_excerpt'])['_provenance']
+        self.assertEqual(source['created_by'], 'seed-admin')
+        self.assertEqual(source['modified_by'], 'warehouse-user')
+        self.assertEqual(source['read_at'], '2026-11-01 09:00:00')
+        self.assertEqual(self.writes, [])
+        self.hub.runtime.respond.assert_not_called()
+        self.decisions.act.assert_not_called()
+        self.practice_api.execute.assert_not_called()
+        self.practice.seed.assert_not_called()
+        self.practice.install.assert_not_called()
+
+    def test_practice_request_is_idempotent_per_user_and_never_returns_another_owners_turn(self):
+        self.prepare_practice_endpoint()
+        first = self.open_practice()
+        first_key = self.inserted[0].request_key
+        repeated = self.open_practice()
+        self.assertEqual(first['name'], repeated['name'])
+        self.assertEqual(len(self.inserted), 1)
+        self.assertEqual(self.locks, ['buyer', 'buyer'])
+        self.f.session.user = 'other'
+        other = self.open_practice()
+        self.assertNotEqual(other['name'], first['name'])
+        self.assertEqual(self.inserted[-1].owner, 'other')
+        self.assertNotEqual(self.inserted[-1].request_key, first_key)
+        self.f.db.get_value = lambda *args: first['name']  # A corrupt/forged lookup must still fail ownership.
+        with self.assertRaises(Denied):
+            self.open_practice()
+        self.assertEqual(len(self.inserted), 2)
+
+    def test_active_analysis_prevents_new_practice_but_a_retry_can_return_its_existing_turn(self):
+        self.prepare_practice_endpoint()
+        existing = self.open_practice()
+        self.f.get_all.return_value = [{'name': 'RUNNING-TURN'}]
+        retry = self.open_practice()
+        self.assertEqual(retry['name'], existing['name'])
+        with self.assertRaisesRegex(Invalid, '尚未完成'):
+            self.open_practice(request_id='6cfffb86-e3b2-4f0b-a1ec-169b61475139')
+        self.assertEqual(len(self.inserted), 1)
+        self.assertEqual(self.f.get_all.call_args.kwargs['filters'],
+                         {'owner': 'buyer', 'state': ['in', ['queued', 'running']]})
+
+    def test_practice_without_registration_or_read_permission_cannot_create_an_entry(self):
+        self.prepare_practice_endpoint()
+        self.practice.current_case.return_value = None
+        self.assertFalse(self.hub.chat_status()['practice_available'])
+        with self.assertRaisesRegex(Invalid, '尚未初始化'):
+            self.open_practice()
+        self.assertEqual(self.inserted, [])
+        self.practice_api.read_case.assert_not_called()
+        self.practice.current_case.return_value = self.practice_case.name
+        self.practice_api.read_case.side_effect = Denied('case not readable')
+        with self.assertRaises(Denied):
+            self.open_practice()
+        self.assertEqual(self.inserted, [])
+        self.practice.current_case.side_effect = Denied('registry not readable')
+        self.assertFalse(self.hub.chat_status()['practice_available'])
+
+    def test_malformed_practice_uuids_fail_before_locking_reading_or_saving(self):
+        self.prepare_practice_endpoint()
+        for field in ('conversation', 'request_id'):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.open_practice(**{field: 'not-a-uuid'})
+        self.assertEqual(self.locks, [])
+        self.assertEqual(self.inserted, [])
+        self.practice.current_case.assert_not_called()
+        self.practice_api.read_case.assert_not_called()
+
+    def test_practice_entry_rejects_non_sandbox_and_missing_registered_summary(self):
+        self.prepare_practice_endpoint()
+        for kind in ('erp', 'synthetic', 'unbound'):
+            with self.subTest(kind=kind):
+                self.decisions.build.return_value['kind'] = kind
+                with self.assertRaisesRegex(Invalid, '注册或读取验证未通过'):
+                    self.open_practice()
+        self.decisions.build.return_value['kind'] = 'sandbox'
+        self.practice.summary.side_effect = None
+        self.practice.summary.return_value = None
+        with self.assertRaisesRegex(Invalid, '注册或读取验证未通过'):
+            self.open_practice()
+        self.assertEqual(self.inserted, [])
+
+    def test_practice_entry_requires_exact_registered_isolated_dataset_contract(self):
+        self.prepare_practice_endpoint()
+        original = deepcopy(self.decisions.build.return_value)
+        for field, value in [('registered', False), ('registered', 1), ('scope', 'ordinary_erp'), ('dataset_id', '')]:
+            with self.subTest(field=field, value=value):
+                self.decisions.build.return_value = deepcopy(original)
+                self.decisions.build.return_value['sandbox'][field] = value
+                with self.assertRaises(Invalid):
+                    self.open_practice()
+        self.assertEqual(self.inserted, [])
+
+    def test_practice_metadata_must_match_the_registered_dataset_and_case(self):
+        self.prepare_practice_endpoint()
+        original = deepcopy(self.practice_summary)
+        for field, value in [('registered', False), ('registered', 1), ('scope', 'ordinary_erp'),
+                             ('dataset_id', ''), ('dataset_id', 'different-registered-dataset')]:
+            with self.subTest(field=field, value=value):
+                self.practice_summary = {**original, field: value}
+                with self.assertRaises(Invalid):
+                    self.open_practice()
+        self.practice_summary = original
+        wrong_case = self.hub.with_resolution(self.turn, {})
+        wrong_case['practice']['case_name'] = 'OTHER-CASE'
+        with patch.object(self.hub, 'with_resolution', return_value=wrong_case), self.assertRaises(Invalid):
+            self.open_practice()
+        self.assertEqual(self.inserted, [])
+        self.assertEqual(self.writes, [])
+
 
 if __name__ == '__main__':
     unittest.main()

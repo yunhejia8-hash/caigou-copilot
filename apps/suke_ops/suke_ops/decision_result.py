@@ -10,7 +10,7 @@ import re
 import frappe
 from frappe.utils import now_datetime
 
-from suke_ops import api, approval
+from suke_ops import api, approval, supply_practice
 
 SCOPE = 'on_hand_only'
 ACTIONS = {'bind_case': {'case_name', 'reason'}, 'choose': {'plan_id', 'fingerprint', 'reason'},
@@ -95,6 +95,21 @@ def _is_demo(case):
     return bool(case.is_simulation or str(case.item_code).startswith('SUKE-') or '演示' in str(case.company))
 
 
+def _practice(case):
+    value = supply_practice.context(case)
+    if value and value.get('registered') is not True:
+        frappe.throw('隔离演练未取得有效服务器注册')
+    return value
+
+
+def _check_practice_order(case, po, expected):
+    current = supply_practice.check_order(case, po)
+    if (not current or current.get('registered') is not True
+            or any(current.get(key) != expected.get(key) for key in ('dataset_id', 'site', 'version'))):
+        frappe.throw('隔离演练注册状态或版本已变化，不能继续提交采购单')
+    return current
+
+
 def _check_po(po, case):
     po.check_permission('read')
     if po.company != case.company or not any(row.item_code == case.item_code and row.warehouse == case.warehouse for row in po.items):
@@ -107,9 +122,12 @@ def _check_po(po, case):
 
 
 def _approved_orders(case):
-    if not case.purchase_order or _is_demo(case):
+    practice = _practice(case)
+    if not case.purchase_order or (_is_demo(case) and not practice):
         return []
     po = _check_po(frappe.get_doc('Purchase Order', case.purchase_order), case)
+    if practice:
+        _check_practice_order(case, po, practice)
     if po.docstatus not in (0, 1) or po.status in ('Closed', 'Cancelled', 'Completed'):
         return []
     signature = approval.document_hash(po)
@@ -172,6 +190,7 @@ def build(turn, result):
     card = _empty('erp')
     try:
         case = api.read_case(name)
+        practice = _practice(case)
         analysis = api.get_analysis(name, scope=SCOPE)
         stock_uom = analysis['context'].get('stock_uom')
         card.update(case={'name': case.name, 'item_code': case.item_code, 'warehouse': case.warehouse,
@@ -180,7 +199,12 @@ def build(turn, result):
                     fingerprint=analysis['fingerprint'], choices=[_choice(p, stock_uom) for p in analysis['plans']],
                     title='选择本次现存分配方案', state='needs_choice',
                     summary='先选择保障顺序并送审；审批通过后仅执行现存自由库存预留。未来到货不作为现存。')
-        if _is_demo(case):
+        if practice:
+            card.update(kind='sandbox', sandbox={'dataset_id': practice['dataset_id'], 'registered': True,
+                        'label': practice['label'], 'scope': 'isolated_erp'},
+                        title='选择本地隔离演练方案',
+                        summary='虚拟业务数据已写入本地 ERP；选择后仍须审批，执行仅影响本次注册的隔离库存与单据。')
+        elif _is_demo(case):
             card.update(kind='synthetic', summary='这是合成业务案例；仅展示候选分配，不允许从聊天执行真实单据。')
             card['requirements'] = ['合成案例不能生成真实审批或采购执行。']
             return card
@@ -262,10 +286,11 @@ def act(turn, result, action, **kwargs):
         updated['resolution_context'] = {**updated.get('resolution_context', {}), 'explicit_case': name}
         updated.pop('resolution', None)
     else:
-        if not current.get('case') or current['kind'] != 'erp':
+        if not current.get('case') or current['kind'] not in ('erp', 'sandbox'):
             frappe.throw('请先关联可读取的真实供应异常')
         case = api.read_case(current['case']['name'])
-        if _is_demo(case):
+        practice = _practice(case)
+        if (_is_demo(case) and not practice) or (current['kind'] == 'sandbox' and not practice):
             frappe.throw('合成案例不能执行真实业务')
         if action == 'choose':
             plan = _text(kwargs.get('plan_id'), '方案编号', 80)
@@ -313,13 +338,22 @@ def act(turn, result, action, **kwargs):
 
 
 def _submit_order(case, values):
+    practice = _practice(case)
+    if _is_demo(case) and not practice:
+        frappe.throw('未注册的合成案例不能提交采购单')
     name = _text(values.get('order_name'), '采购单号', 140)
     expected = _text(values.get('source_hash'), '采购审批版本', 80)
     if name != case.purchase_order:
         frappe.throw('采购单不属于本次异常', frappe.PermissionError)
     frappe.db.sql('select name from `tabPurchase Order` where name=%s for update', name)
     po = _check_po(frappe.get_doc('Purchase Order', name), case)
-    if '演示' in str(po.company) or any(str(row.item_code).startswith('SUKE-') for row in po.items):
+    locked_practice = supply_practice.lock_case(case)
+    if practice and (not locked_practice or locked_practice.get('registered') is not True
+                     or any(locked_practice.get(key) != practice.get(key) for key in ('dataset_id', 'site', 'version'))):
+        frappe.throw('隔离演练注册状态或版本已变化，不能继续提交采购单')
+    if practice:
+        _check_practice_order(case, po, locked_practice)
+    elif '演示' in str(po.company) or any(str(row.item_code).startswith('SUKE-') for row in po.items):
         frappe.throw('演示采购单不能从真实执行入口提交')
     if approval.document_hash(po) != expected:
         frappe.throw('采购单内容已变化，原批准不可执行')

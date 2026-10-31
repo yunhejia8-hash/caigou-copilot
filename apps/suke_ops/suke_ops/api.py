@@ -4,6 +4,7 @@ from datetime import datetime, time
 import frappe
 from frappe.utils import flt, now_datetime
 from suke_ops.engine import compare, digest, negotiate_simulated
+from suke_ops import supply_practice
 
 PLANNERS = {'Supply Planner', 'Supply Approver', 'System Manager'}
 
@@ -30,6 +31,22 @@ def _scope(value):
     if value not in (None, '', 'on_hand_only'):
         frappe.throw('不支持的方案范围')
     return value or None
+
+
+def _execution_context(case, scope):
+    """Simulation provenance is immutable; only a registered local sandbox may write."""
+    practice = supply_practice.lock_case(case)
+    if practice and (practice.get('registered') is not True or scope != 'on_hand_only'):
+        frappe.throw('隔离演练只能按已注册范围执行现存库存方案')
+    synthetic = bool(case.is_simulation or str(case.item_code).startswith('SUKE-') or '演示' in str(case.company))
+    if synthetic and not practice:
+        frappe.throw('未注册的合成案例不能申请、批准或执行库存操作')
+    return practice
+
+
+def _check_scope_identity(practice, ctx):
+    if practice and ctx.get('sandbox') != {key: practice[key] for key in ('dataset_id', 'site', 'version')}:
+        frappe.throw('隔离演练注册状态或版本已变化，请重新核实后操作')
 
 
 def _scope_read(doc):
@@ -112,12 +129,14 @@ def snapshot(case, scope=None):
                         'root_sales_order': wo.sales_order, 'qty': qty,
                         'need_by': start.isoformat() + '+08:00', 'per_unit': r.required_qty / wo.qty,
                         'min_batch_qty': min(qty, (case.minimum_batch or 1) * r.required_qty / wo.qty),
-                        'other_materials_ready': other_ready, 'priority': '明日开工'})
+                        'other_materials_ready': other_ready,
+                        'priority': '重点客户' if scope and case.priority_sales_order and wo.sales_order == case.priority_sales_order else '明日开工'})
         versions.append(['Work Order', wo.name, str(wo.modified)])
     for r in frappe.get_all('Stock Reservation Entry', filters={'item_code': item, 'warehouse': warehouse, 'docstatus': 1, 'status': ['not in', ['Cancelled', 'Closed']]}, fields=['name', 'voucher_type', 'voucher_no', 'voucher_detail_no', 'reserved_qty', 'delivered_qty', 'transferred_qty', 'consumed_qty', 'modified']):
         qty = max(0, r.reserved_qty - max(r.delivered_qty, r.transferred_qty, r.consumed_qty))
         if qty:
-            reservations.append({'id': r.name, 'demand_id': r.voucher_detail_no, 'qty': qty, 'document': r.voucher_no})
+            reservations.append({'id': r.name, 'demand_id': r.voucher_detail_no, 'qty': qty, 'document': r.voucher_no,
+                                 **({'document_type': r.voucher_type} if scope else {})})
             versions.append(['Stock Reservation Entry', r.name, str(r.modified)])
     supplies = []
     for row in ([] if scope else frappe.get_all('Purchase Order Item', filters={'item_code': item, 'warehouse': warehouse, 'docstatus': 1}, fields=['parent', 'name'])):
@@ -156,13 +175,20 @@ def snapshot(case, scope=None):
     stock_uom = frappe.db.get_value('Item', item, 'stock_uom')
     if scope and not stock_uom:
         frappe.throw('物料缺少库存单位，不能批准或执行数量分配')
-    return {**({'scope': scope} if scope else {}), 'item_code': item, 'stock_uom': stock_uom, 'warehouse': warehouse, 'as_of': str(case.event_time).replace(' ', 'T') + '+08:00',
+    result = {**({'scope': scope} if scope else {}), 'item_code': item, 'stock_uom': stock_uom, 'warehouse': warehouse, 'as_of': str(case.event_time).replace(' ', 'T') + '+08:00',
             'actual_qty': flt(bin_doc.actual_qty) if bin_doc else 0, 'blocked_qty': flt(case.blocked_qty),
             'demands': sorted(demands, key=lambda r: r['id']), 'supplies': sorted(supplies, key=lambda r: r['id']),
             'reservations': sorted(reservations, key=lambda r: r['id']), 'versions': sorted(versions),
             'stock_version': str(bin_doc.modified) if bin_doc else '', 'agreement_version': digest(agreement),
             'extra_cost': agreement.get('extra_cost') or 0,
             'date_assumption': '销售需货时间采用交期日17:00，工单采用计划开工时间；时区UTC+8。'}
+    if scope:
+        practice = supply_practice.validate_snapshot(case, result)
+        if practice:
+            if practice.get('registered') is not True:
+                frappe.throw('隔离演练未取得有效服务器注册')
+            result['sandbox'] = {key: practice[key] for key in ('dataset_id', 'site', 'version')}
+    return result
 
 
 @frappe.whitelist()
@@ -216,11 +242,11 @@ def negotiate(name, ceiling=23, max_rounds=3, refusal=0):
 def propose(name, selected_plan, fingerprint, reason, scope=None):
     case = read_case(name)
     scope = _scope(scope)
-    if scope and case.is_simulation:
-        frappe.throw('合成案例只能演示复核，不能申请真实库存执行')
+    practice = _execution_context(case, scope)
     if not reason or not str(reason).strip():
         frappe.throw('请填写方案选择依据和可接受的影响')
     ctx = snapshot(case, scope)
+    _check_scope_identity(practice, ctx)
     analysis = compare(ctx)
     if scope:
         for candidate in analysis['plans']:
@@ -248,9 +274,10 @@ def validate_decision(doc, method=None):
         saved_plan = loads(doc.plan_json, {})
         scope = _scope(saved_plan.get('scope'))
         case = read_case(doc.supply_case)
-        if scope and case.is_simulation:
-            frappe.throw('合成案例不能批准真实库存执行')
-        current = compare(snapshot(case, scope))
+        practice = _execution_context(case, scope)
+        ctx = snapshot(case, scope)
+        _check_scope_identity(practice, ctx)
+        current = compare(ctx)
         if scope:
             for candidate in current['plans']:
                 candidate['scope'] = scope
@@ -275,6 +302,7 @@ def transition(name, action, reason=None):
     from frappe.model.workflow import apply_workflow
     doc = frappe.get_doc('Supply Decision', name)
     doc.check_permission('write')
+    _execution_context(read_case(doc.supply_case), _scope(loads(doc.plan_json, {}).get('scope')))
     if action in ('驳回', '修正重提') and not str(reason or '').strip():
         frappe.throw('请填写驳回或修正说明')
     if reason:
@@ -290,15 +318,14 @@ def execute(name):
     frappe.db.sql('select name from `tabSupply Decision` where name=%s for update', name)
     doc = frappe.get_doc('Supply Decision', name)
     doc.check_permission('write')
+    case = read_case(doc.supply_case)
+    plan = loads(doc.plan_json, {})
+    scope = _scope(plan.get('scope'))
+    practice = _execution_context(case, scope)
     if doc.workflow_state == '已执行':
         return loads(doc.execution_result, {})
     if doc.workflow_state != '已批准':
         frappe.throw('方案必须由负责人批准后才能执行')
-    case = read_case(doc.supply_case)
-    plan = loads(doc.plan_json, {})
-    scope = _scope(plan.get('scope'))
-    if scope and case.is_simulation:
-        frappe.throw('合成案例不能执行真实库存操作')
     frappe.db.sql('select name from `tabBin` where item_code=%s and warehouse=%s for update', (case.item_code, case.warehouse))
     ctx = snapshot(case, scope)
     if scope:
@@ -311,6 +338,7 @@ def execute(name):
         frappe.db.sql('select name from `tabStock Reservation Entry` where item_code=%s and warehouse=%s for update',
                       (case.item_code, case.warehouse))
         ctx = snapshot(case, scope)
+    _check_scope_identity(practice, ctx)
     if digest(ctx) != doc.snapshot_hash:
         frappe.throw('审批后供需已变化，请重新分析和审批，未执行任何库存修改')
     created, tasks = [], []
@@ -345,7 +373,9 @@ def execute(name):
                                   'priority': 'High', 'description': f"{row['document']}：计划未来到货分配{future:g}{ctx['stock_uom'] or '（库存单位未提供）'}；未覆盖缺口{row['shortage_qty']:g}{ctx['stock_uom'] or '（库存单位未提供）'}。请跟踪到货/催交；" + ('仅执行本次获批的现存自由库存预留，未新增采购。' if scope else '此为合成演示。')}).insert()
             tasks.append(task.name)
     doc.flags.executing = True
-    doc.execution_result = json.dumps({'reservations': created, 'tasks': tasks, 'executed_by': frappe.session.user, 'executed_at': str(now_datetime())}, ensure_ascii=False)
+    doc.execution_result = json.dumps({'reservations': created, 'tasks': tasks, 'executed_by': frappe.session.user,
+                                      'executed_at': str(now_datetime()),
+                                      **({'sandbox': {key: practice[key] for key in ('dataset_id', 'site', 'version')}} if practice else {})}, ensure_ascii=False)
     doc.workflow_state = '已执行'
     # Workflow 校验认可负责人从已批准到已执行；同一事务内所有预留失败即回滚。
     doc.save()

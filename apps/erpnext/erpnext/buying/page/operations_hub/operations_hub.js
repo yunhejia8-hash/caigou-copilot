@@ -8,7 +8,7 @@ function redirect_operations_home() {
 frappe.pages['operations-hub'].on_page_load = function (wrapper) {
     if (redirect_operations_home()) return;
     const page = frappe.ui.make_app_page({parent: wrapper, title: '总控主页', single_column: true});
-    frappe.require(['/assets/suke_ops/hub.css?v=supply-decision-v1.css', '/assets/suke_ops/hub.js?v=supply-decision-v1.js'], () => {
+    frappe.require(['/assets/suke_ops/hub.css?v=supply-practice-v1.css', '/assets/suke_ops/hub.js?v=supply-practice-v1.js'], () => {
         wrapper.supply_hub = new frappe.SupplyHome(page);
     });
 };

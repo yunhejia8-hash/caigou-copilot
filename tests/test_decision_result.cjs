@@ -7,12 +7,12 @@ const path = require('node:path');
 function environment() {
     const messages = [], prompts = [];
     const context = {frappe: {utils: {escape_html: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')},
-        markdown: value => value, msgprint: value => messages.push(value), prompt: (fields, callback, title, label) => {prompts.push({fields, callback, title, label});}}, console};
+        markdown: value => value, msgprint: value => messages.push(value), prompt: (fields, callback, title, label) => {prompts.push({fields, callback, title, label});}}, crypto: {randomUUID: () => 'test-request-id'}, console};
     vm.createContext(context);
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../apps/suke_ops/suke_ops/public/hub.js'), 'utf8'), context);
     const h = Object.create(context.frappe.SupplyHub.prototype);
     h.conversation = 'original-conversation'; h.module = 'control'; h.turns = []; h.busy = h.restoring = false;
-    h.renderMessages = () => {}; h.calls = [];
+    h.renderMessages = h.renderBusy = () => {}; h.calls = [];
     h.call = async (method, args) => {h.calls.push({method, args}); return {...h.turns[0], resolution: {...h.turns[0].resolution, state: 'pending_approval'}};};
     return {h, messages, prompts, context};
 }
@@ -181,4 +181,81 @@ test('synthetic conditional candidates are separate from executable current stoc
     assert.match(html, /不构成齐料承诺/); assert.match(html, /data-resolution-action="choose"[^>]* disabled/);
     assert.ok(!html.includes('<details open'));
     t.resolution.kind = 'erp'; assert.ok(!h.resolutionCard(t).includes('条件落实后候选'));
+});
+function practiceTurn() {
+    return {...turn({kind:'sandbox', sandbox:{registered:true,dataset_id:'TEST-DATASET',scope:'isolated_erp',label:'独立测试数据'},case:{name:'CASE-1',is_simulation:1,stock_uom:'件'}}),
+        mode:'程序核算 · 本地虚拟数据', practice:{dataset_id:'TEST-DATASET',case_name:'CASE-1',label:'独立测试数据',
+            metrics:[{label:'合格仓现存',value:612,unit:'件'},{label:'自由量',value:192,unit:'件'}],
+            sources:[{doctype:'Supply Case',name:'CASE-1',label:'原始异常'}]}};
+}
+test('only the exact registered isolated sandbox may execute; legacy synthetic evidence never gains permission', () => {
+    const {h}=environment(), t=practiceTurn();
+    assert.equal(h.resolutionAllowed(t,'choose',{plan_id:'sales'}),true);
+    t.resolution.can.execute=true;assert.equal(h.resolutionAllowed(t,'execute'),true);
+    for(const change of [x=>x.resolution.sandbox.registered=false,x=>x.resolution.sandbox.registered=1,x=>x.resolution.sandbox.scope='global',x=>x.resolution.sandbox.dataset_id='',x=>x.resolution.kind='synthetic',x=>x.synthetic=true,x=>x.verified_evidence={}]) {
+        const blocked=practiceTurn();change(blocked);assert.equal(h.resolutionAllowed(blocked,'choose',{plan_id:'sales'}),false);
+    }
+});
+test('sandbox card labels actual writes, displays current source metrics and only model review depends on a model', () => {
+    const {h}=environment(), t=practiceTurn();h.data={model_ready:false};
+    const html=h.resolutionCard(t);
+    assert.match(html,/虚拟数据 · 实际写入本地测试单据/);assert.match(html,/采购待你决定/);
+    assert.match(html,/已读取业务单据；可直接选择，或继续四部门核查/);assert.match(html,/>612 /);assert.match(html,/>192 /);
+    assert.ok(!html.includes('620'));assert.match(html,/data-doctype="Supply Case" data-docname="CASE-1"/);
+    assert.match(html,/data-review-supply-practice="TURN-1" disabled/);
+    assert.ok(!/data-resolution-action="choose"[^>]* disabled/.test(html));
+    assert.match(html,/仍可直接选择方案、审批和执行/);
+});
+test('practice entry reads availability independently from dashboard model state and renders without a model', async () => {
+    const {h}=environment();h.view='chat';h.data={};const rendered=[];h.render=()=>rendered.push(h.data);
+    h.call=async(method,args)=>{h.calls.push({method,args});return method==='chat_status'?{practice_available:true}:{model_ready:false};};
+    await h.refresh();assert.equal(h.data.practice_available,true);assert.equal(h.data.model_ready,false);
+    assert.deepEqual(h.calls.map(row=>row.method),['dashboard','chat_status']);assert.equal(rendered.length,1);
+});
+test('opening practice uses no model API, prevents duplicate requests and inserts the completed result', async () => {
+    const {h}=environment();h.data={practice_available:true,model_ready:false};let resolve;
+    h.call=(method,args)=>{h.calls.push({method,args});return new Promise(done=>{resolve=done;});};
+    const first=h.openSupplyPractice();await h.openSupplyPractice();assert.equal(h.calls.length,1);
+    assert.equal(h.calls[0].method,'open_supply_practice');assert.equal(h.calls[0].args.conversation,'original-conversation');
+    assert.equal(h.calls[0].args.request_id,'test-request-id');assert.equal(h.practiceOpening,true);
+    const t=practiceTurn();resolve(t);await first;assert.equal(h.turns[0],t);assert.equal(h.practiceOpening,false);assert.equal(h.practiceRequest,null);
+});
+test('practice response from a previous conversation is discarded and unavailable entry does not send', async () => {
+    const {h}=environment();h.data={practice_available:false};await h.openSupplyPractice();assert.equal(h.calls.length,0);
+    h.data.practice_available=true;let resolve;h.call=()=>new Promise(done=>{resolve=done;});
+    const pending=h.openSupplyPractice();h.conversation='new-conversation';h.turns=[{name:'NEW'}];resolve(practiceTurn());await pending;
+    assert.equal(h.turns.length,1);assert.equal(h.turns[0].name,'NEW');assert.equal(h.practiceOpening,false);
+});
+test('failed practice reads keep the same request id for retry without adding a phantom message', async () => {
+    const {h,messages}=environment();h.data={practice_available:true};
+    h.call=async(method,args)=>{h.calls.push({method,args});if(h.calls.length===1)throw new Error('offline');return practiceTurn();};
+    await h.openSupplyPractice();assert.equal(h.turns.length,0);assert.equal(h.practiceOpening,false);assert.equal(messages.length,1);
+    await h.openSupplyPractice();assert.equal(h.calls[0].args.request_id,h.calls[1].args.request_id);assert.equal(h.turns.length,1);
+});
+test('four-department review explicitly sends the case identity to the existing start API and requires a model', async () => {
+    const {h}=environment(), t=practiceTurn();h.turns=[t];h.data={model_ready:false};
+    await h.reviewSupplyPractice(t.name);assert.equal(h.calls.length,0);
+    h.data.model_ready=true;h.host={find:()=>({val:()=>''})};h.watch=async()=>{h.busy=false;};
+    h.call=async(method,args)=>{h.calls.push({method,args});return {name:'REVIEW-TURN'};};
+    await h.reviewSupplyPractice(t.name);
+    assert.equal(h.calls.length,1);assert.equal(h.calls[0].method,'start');assert.equal(h.calls[0].args.supply_case,'CASE-1');
+    assert.match(h.calls[0].args.question,/采购、销售、库存、生产四部门/);assert.match(h.calls[0].args.question,/CASE-1/);
+    assert.equal(h.calls[0].args.scenario_id,undefined);assert.equal(h.calls[0].args.synthetic,undefined);
+});
+test('program-calculated turns do not claim model discussion and retain actual query audit', () => {
+    const {h,context}=environment();let html='';const t=practiceTurn();t.events=[{id:1}];h.turns=[t];h.names={control:'总控'};h.data={model_ready:false};
+    const node={scrollTop:0,scrollHeight:300,clientHeight:300,querySelectorAll:()=>[]};h.host={find:()=>({0:node,html:value=>{html=value;},scrollTop(){}})};
+    h.auditTrail=()=>'<div>实际单据查询</div>';context.frappe.SupplyHub.prototype.renderMessages.call(h);
+    assert.match(html,/程序核算 · 本地虚拟数据/);assert.match(html,/查看单据读取留痕/);assert.match(html,/实际单据查询/);
+    assert.ok(!html.includes('合成场景 · 真实协作'));assert.ok(!html.includes('/10项反馈'));
+});
+test('practice quick entry is shown only for an available control dataset and stays enabled without a model', () => {
+    const {h,context}=environment(),nodes=new Map();
+    h.view='chat';h.names={control:'总控'};h.data={model_ready:false,practice_available:true};h.renderBoard=()=>{};
+    h.host={find:selector=>{if(!nodes.has(selector))nodes.set(selector,{markup:'',each(){},html(value){this.markup=value;return this;},append(value){this.markup+=value;return this;},text(value){this.textValue=value;return this;},prop(name,value){this[name]=value;return this;}});return nodes.get(selector);}};
+    context.frappe.SupplyHub.prototype.render.call(h);context.frappe.SupplyHub.prototype.renderBusy.call(h);
+    assert.match(nodes.get('.hub-prompts').markup,/data-open-supply-practice/);assert.equal(nodes.get('[data-open-supply-practice]').disabled,false);
+    assert.equal(nodes.get('[data-review-supply-practice]').disabled,true);assert.match(nodes.get('.hub-model-note').textValue,/仍可处理连接器延期/);
+    h.data.practice_available=false;context.frappe.SupplyHub.prototype.render.call(h);
+    assert.ok(!nodes.get('.hub-prompts').markup.includes('data-open-supply-practice'));
 });

@@ -111,6 +111,9 @@ class DecisionResultTests(unittest.TestCase):
         self.f.docs['Supply Case', 'CASE'] = self.case
         self.f.docs['Purchase Order', 'PO'] = self.po
         self.approval = NS(document_hash=lambda po: digest([po.name, po.grand_total, po.terms]))
+        self.practice = NS(context=lambda case: None, validate_snapshot=lambda case, ctx: None,
+                           check_order=lambda case, po: None)
+        self.practice.lock_case = lambda case: self.practice.context(case)
         self.api = NS(PLANNERS={'Supply Planner', 'Supply Approver', 'System Manager'},
                       loads=lambda value, default=None: json.loads(value) if value else default,
                       read_case=self.read_case, get_analysis=self.analysis,
@@ -118,7 +121,8 @@ class DecisionResultTests(unittest.TestCase):
         self.proposals, self.executions = 0, 0
         with patch.dict(sys.modules, {'frappe': self.f, 'frappe.utils': self.utils}), \
                 patch.object(suke_ops, 'api', self.api, create=True), \
-                patch.object(suke_ops, 'approval', self.approval, create=True):
+                patch.object(suke_ops, 'approval', self.approval, create=True), \
+                patch.object(suke_ops, 'supply_practice', self.practice, create=True):
             self.mod = load('_decision_result_test', 'decision_result.py')
 
     def read_case(self, name):
@@ -128,10 +132,14 @@ class DecisionResultTests(unittest.TestCase):
 
     def analysis(self, name, scope):
         self.assertEqual(scope, 'on_hand_only')
-        result = compare(self.ctx)
+        ctx = deepcopy(self.ctx)
+        practice = self.practice.context(self.case)
+        if practice:
+            ctx['sandbox'] = {key: practice[key] for key in ('dataset_id', 'site', 'version')}
+        result = compare(ctx)
         for plan in result['plans']:
             plan['scope'] = scope
-        return {'context': self.ctx, **result}
+        return {'context': ctx, **result}
 
     def propose(self, name, plan, fingerprint, reason, scope):
         self.assertEqual(scope, 'on_hand_only')
@@ -337,6 +345,90 @@ class DecisionResultTests(unittest.TestCase):
         with self.assertRaises(Invalid):
             self.mod.act(self.turn, self.result, 'choose', plan_id='sales_first', qty=999)
 
+    def register_sandbox(self):
+        self.case.is_simulation = 1
+        entry = {'dataset_id': 'TEST-DATASET', 'registered': True, 'label': '本地隔离演练',
+                 'site': 'focus.local', 'version': 'v1'}
+        self.practice.context = lambda case: entry
+        self.practice.check_order = lambda case, po: entry
+        return entry
+
+    def test_registered_sandbox_keeps_provenance_and_uses_approval_execution_boundary(self):
+        self.register_sandbox()
+        card = self.mod.build(self.turn, self.result)
+        self.assertEqual(card['kind'], 'sandbox')
+        self.assertEqual(card['case']['is_simulation'], 1)
+        self.assertEqual(card['sandbox']['scope'], 'isolated_erp')
+        self.choose()
+        self.assertEqual(self.result['resolution']['state'], 'pending_approval')
+        with self.assertRaises(Denied):
+            self.mod.act(self.turn, self.result, 'execute')
+        self.result = self.mod.act(self.turn, self.result, 'approve', reason='本地隔离演练审批')
+        output = self.mod.act(self.turn, self.result, 'execute', reason='确认只预留隔离数据')
+        self.assertEqual(output['resolution']['state'], 'executed')
+        self.assertEqual(self.executions, 1)
+        self.assertEqual(self.case.is_simulation, 1)
+
+    def test_client_sandbox_flag_and_unregistered_demo_cannot_authorize_execution(self):
+        self.case.is_simulation = 1
+        self.result['resolution'] = {'kind': 'sandbox', 'sandbox': {'registered': True},
+                                    'can': {'execute': True}, 'case': {'name': 'CASE'}}
+        card = self.mod.build(self.turn, self.result)
+        self.assertEqual(card['kind'], 'synthetic')
+        self.assertFalse(any(card['can'].values()))
+        with self.assertRaises(Invalid):
+            self.mod.act(self.turn, self.result, 'execute')
+        self.assertEqual(self.executions, 0)
+
+    def test_registry_version_change_or_revocation_invalidates_selected_sandbox(self):
+        entry = self.register_sandbox()
+        self.choose()
+        self.result = self.mod.act(self.turn, self.result, 'approve')
+        entry['version'] = 'v2'
+        self.assertEqual(self.mod.build(self.turn, self.result)['state'], 'stale')
+        with self.assertRaises(Denied):
+            self.mod.act(self.turn, self.result, 'execute')
+        self.practice.context = lambda case: None
+        self.assertEqual(self.mod.build(self.turn, self.result)['kind'], 'synthetic')
+        with self.assertRaises(Invalid):
+            self.mod.act(self.turn, self.result, 'execute')
+        self.assertEqual(self.executions, 0)
+
+    def test_sandbox_po_requires_registered_rows_and_real_matching_approval(self):
+        entry = self.register_sandbox()
+        approved = self.approve_po()
+        checked = []
+        def check_order(case, po):
+            checked.append(po.name)
+            if any(row.item_code != case.item_code or row.warehouse != case.warehouse for row in po.items):
+                raise Denied('Unregistered purchase row')
+            return entry
+        self.practice.check_order = check_order
+        outside = Doc(item_code='OUTSIDE', warehouse='WH', qty=1, uom='件', rate=1, amount=1,
+                      schedule_date='2026-11-02')
+        self.po.items.append(outside)
+        with self.assertRaises(Denied):
+            self.mod.act(self.turn, self.result, 'submit_order', order_name='PO', source_hash=approved.source_hash)
+        self.assertEqual(self.po.submissions, 0)
+        self.po.items.pop()
+        output = self.mod.act(self.turn, self.result, 'submit_order', order_name='PO', source_hash=approved.source_hash)
+        self.assertEqual(self.po.submissions, 1)
+        self.assertEqual(output['resolution']['approved_orders'][0]['approval'], 'APPROVAL')
+        self.assertGreaterEqual(len(checked), 3)
+
+    def test_sandbox_order_registration_revoked_during_checks_cannot_submit(self):
+        entry = self.register_sandbox()
+        approved = self.approve_po()
+        for replacement in (None, {**entry, 'dataset_id': 'ANOTHER-DATASET'}, {**entry, 'version': 'v2'}):
+            self.practice.check_order = lambda case, po, replacement=replacement: replacement
+            with self.assertRaises(Invalid):
+                self.mod._submit_order(self.case, {'order_name': 'PO', 'source_hash': approved.source_hash})
+        self.practice.check_order = lambda case, po: entry
+        self.practice.lock_case = lambda case: None
+        with self.assertRaises(Invalid):
+            self.mod._submit_order(self.case, {'order_name': 'PO', 'source_hash': approved.source_hash})
+        self.assertEqual(self.po.submissions, 0)
+
 
 class OnHandScopeTests(unittest.TestCase):
     def setUp(self):
@@ -351,7 +443,11 @@ class OnHandScopeTests(unittest.TestCase):
         for kind, name in [('Company', 'Company'), ('Item', 'CONNECTOR'), ('Warehouse', 'WH')]:
             self.f.docs[kind, name] = Doc(name=name, company='Company', is_group=0, disabled=0)
         self.f.docs['Supply Case', 'CASE'] = self.case
-        with patch.dict(sys.modules, {'frappe': self.f, 'frappe.utils': NS(flt=float, now_datetime=datetime.now)}):
+        self.practice = NS(context=lambda case: None, validate_snapshot=lambda case, ctx: None,
+                           check_order=lambda case, po: None)
+        self.practice.lock_case = lambda case: self.practice.context(case)
+        with patch.dict(sys.modules, {'frappe': self.f, 'frappe.utils': NS(flt=float, now_datetime=datetime.now)}), \
+                patch.object(suke_ops, 'supply_practice', self.practice, create=True):
             self.api = load('_on_hand_api_test', 'api.py')
 
     def test_on_hand_ignores_all_purchase_and_simulated_supply_without_querying_po(self):
@@ -379,8 +475,80 @@ class OnHandScopeTests(unittest.TestCase):
 
     def test_simulation_cannot_use_new_proposal_scope(self):
         self.case.is_simulation = 1
+        for scope in (None, 'on_hand_only'):
+            with self.assertRaises(Invalid):
+                self.api.propose('CASE', 'sales_first', 'unused', 'reason', scope=scope)
+            plan = {'scope': scope} if scope else {}
+            decision = Doc(name='DEC', supply_case='CASE', workflow_state='已批准', plan_json=json.dumps(plan))
+            decision.get_doc_before_save = lambda: None
+            self.f.docs['Supply Decision', 'DEC'] = decision
+            with self.assertRaises(Invalid):
+                self.api.validate_decision(decision)
+            with self.assertRaises(Invalid):
+                self.api.execute('DEC')
+
+    def register_sandbox(self):
+        self.case.is_simulation = 1
+        entry = {'dataset_id': 'TEST-DATASET', 'registered': True, 'label': '本地隔离演练',
+                 'site': 'focus.local', 'version': 'v1'}
+        self.practice.context = lambda case: entry
+        self.practice.validate_snapshot = lambda case, ctx: entry
+        return entry
+
+    def test_sandbox_registration_is_hashed_and_rechecked_at_proposal_and_approval(self):
+        entry = self.register_sandbox()
+        ctx = self.api.snapshot(self.case, scope='on_hand_only')
+        self.assertEqual(ctx['sandbox'], {'dataset_id': 'TEST-DATASET', 'site': 'focus.local', 'version': 'v1'})
+        self.f.db.exists = lambda *args: 'DEC'
+        self.assertEqual(self.api.propose('CASE', 'sales_first', digest(ctx), '隔离演练', scope='on_hand_only'), 'DEC')
         with self.assertRaises(Invalid):
-            self.api.propose('CASE', 'sales_first', 'unused', 'reason', scope='on_hand_only')
+            self.api.propose('CASE', 'sales_first', digest(ctx), '隔离演练', scope=None)
+        plan = {**compare(ctx)['plans'][0], 'scope': 'on_hand_only'}
+        decision = Doc(supply_case='CASE', selected_plan='sales_first', snapshot_hash=digest(ctx),
+                       plan_json=json.dumps(plan), workflow_state='已批准', reason='reason')
+        decision.get_doc_before_save = lambda: None
+        self.api.validate_decision(decision)
+        entry['version'] = 'v2'
+        with self.assertRaises(Invalid):
+            self.api.validate_decision(decision)
+        self.assertEqual(self.case.is_simulation, 1)
+
+    def test_sandbox_snapshot_rejects_unregistered_source_before_planning(self):
+        self.register_sandbox()
+        calls = []
+        def validate(case, ctx):
+            calls.append((case.name, ctx['scope']))
+            raise Denied('Source line is outside registered dataset')
+        self.practice.validate_snapshot = validate
+        with self.assertRaises(Denied):
+            self.api.get_analysis('CASE', scope='on_hand_only')
+        self.assertEqual(calls, [('CASE', 'on_hand_only')])
+
+    def test_current_registry_lock_and_snapshot_identity_must_agree_before_writing(self):
+        entry = self.register_sandbox()
+        ctx = self.api.snapshot(self.case, scope='on_hand_only')
+        self.f.db.exists = lambda *args: 'DEC'
+        self.practice.lock_case = lambda case: None
+        with self.assertRaises(Invalid):
+            self.api.propose('CASE', 'sales_first', digest(ctx), 'reason', scope='on_hand_only')
+        self.practice.lock_case = lambda case: {**entry, 'version': 'v2'}
+        with self.assertRaises(Invalid):
+            self.api.propose('CASE', 'sales_first', digest(ctx), 'reason', scope='on_hand_only')
+
+    def test_work_order_inherits_key_customer_priority_without_duplicate_sales_demand(self):
+        self.case.priority_sales_order = 'SO-A'
+        self.case.minimum_batch = 100
+        line = Doc(name='WO-A-LINE', item_code='CONNECTOR', required_qty=240,
+                   transferred_qty=0, consumed_qty=0)
+        work = Doc(name='WO-A', company='Company', status='Not Started', required_items=[line],
+                   planned_start_date=datetime(2026, 11, 2, 13), sales_order='SO-A', qty=240, modified='v1')
+        self.f.docs['Work Order', 'WO-A'] = work
+        self.f.get_all = lambda kind, **kw: [NS(parent='WO-A', name='WO-A-LINE')] if kind == 'Work Order Item' else []
+        ctx = self.api.snapshot(self.case, scope='on_hand_only')
+        self.assertEqual(len(ctx['demands']), 1)
+        self.assertEqual(ctx['demands'][0]['document'], 'WO-A')
+        self.assertEqual(ctx['demands'][0]['priority'], '重点客户')
+        self.assertEqual(ctx['demands'][0]['min_batch_qty'], 100)
 
     def test_missing_stock_unit_blocks_new_scope(self):
         self.f.db.get_value = lambda kind, *a, **kw: NS(actual_qty=320, modified='v1') if kind == 'Bin' else None
@@ -388,6 +556,15 @@ class OnHandScopeTests(unittest.TestCase):
             self.api.snapshot(self.case, scope='on_hand_only')
 
     def test_partially_delivered_sales_order_reserves_full_remaining_quantity(self):
+        self.reserve_partial_sales()
+
+    def test_registered_sandbox_still_submits_native_reservation_and_preserves_provenance(self):
+        entry = self.register_sandbox()
+        receipt = self.reserve_partial_sales()
+        self.assertEqual(self.case.is_simulation, 1)
+        self.assertEqual(receipt['sandbox'], {key: entry[key] for key in ('dataset_id', 'site', 'version')})
+
+    def reserve_partial_sales(self):
         line = Doc(name='SO-LINE', stock_qty=300, delivered_qty=100, conversion_factor=1,
                    delivery_date='2026-11-02')
         source = Doc(name='SO', doctype='Sales Order', company='Company', status='To Deliver',
@@ -428,6 +605,7 @@ class OnHandScopeTests(unittest.TestCase):
         self.assertEqual(receipt['reservations'], ['SRE-1'])
         self.assertEqual(len(created), 1)
         self.assertEqual(created[0].submissions, 1)
+        return receipt
 
     def test_scope_is_fingerprinted_and_approval_revalidates_same_scope(self):
         ctx = self.api.snapshot(self.case, scope='on_hand_only')

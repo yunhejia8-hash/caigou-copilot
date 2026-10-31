@@ -209,7 +209,66 @@ def dashboard(module='control', view='chat'):
 @frappe.whitelist()
 def chat_status():
     require_user()
-    return {'model_ready': runtime.configured(), 'client_version': 'procurement-approval-v1'}
+    return {'model_ready': runtime.configured(), 'client_version': 'supply-practice-v1',
+            'practice_available': practice_available()}
+
+
+def practice_available():
+    from suke_ops import supply_practice
+    try:
+        return bool(supply_practice.current_case())
+    except frappe.PermissionError:
+        return False
+
+
+@frappe.whitelist(methods=['POST'])
+def open_supply_practice(conversation=None, request_id=None):
+    """Read registered ERP data into an owned turn; never seed or approve here."""
+    require_user()
+    from suke_ops import supply_practice
+    from suke_ops.api import read_case
+    conversation = str(uuid.UUID(conversation)) if conversation else str(uuid.uuid4())
+    request_id = str(uuid.UUID(request_id)) if request_id else str(uuid.uuid4())
+    key = hashlib.sha256(('supply-practice:' + frappe.session.user + ':' + request_id).encode()).hexdigest()
+    frappe.db.sql('select name from tabUser where name=%s for update', frappe.session.user)
+    existing = frappe.db.get_value('Agent Turn', {'request_key': key}, 'name')
+    if existing:
+        turn = owned_turn(existing)
+        return resolution_payload(turn, with_resolution(turn, json.loads(turn.result or '{}')))
+    if frappe.get_all('Agent Turn', filters={'owner': frappe.session.user,
+                      'state': ['in', ['queued', 'running']]}, fields=['name'], limit_page_length=1):
+        frappe.throw('上一条分析尚未完成，请稍候。')
+    name = supply_practice.current_case()
+    if not name:
+        frappe.throw('尚未初始化本地虚拟实操数据，请联系管理员。')
+    case = read_case(name)
+    turn = frappe.get_doc({'doctype': 'Agent Turn', 'owner': frappe.session.user,
+        'conversation': conversation, 'request_key': key, 'agent_module': 'control', 'state': 'done',
+        'question': '处理连接器延期：' + case.name,
+        'answer': '已读取业务单据。请在下方选择保障顺序并送审；审批通过后执行现存库存预留。'
+                  '原采购订单继续跟踪，未确认的提前批不计入可用量。'})
+    result = with_resolution(turn, {'mode': '程序核算 · 本地虚拟数据',
+        'resolution_context': {'explicit_case': case.name, 'case_names': [case.name]}})
+    practice = result.get('practice') or {}
+    sandbox = (result.get('resolution') or {}).get('sandbox') or {}
+    if (result.get('resolution', {}).get('kind') != 'sandbox'
+            or practice.get('registered') is not True or sandbox.get('registered') is not True
+            or practice.get('scope') != 'isolated_erp' or sandbox.get('scope') != 'isolated_erp'
+            or not practice.get('dataset_id') or practice['dataset_id'] != sandbox.get('dataset_id')
+            or practice.get('case_name') != case.name):
+        frappe.throw('本批虚拟数据注册或读取验证未通过，未创建操作入口。')
+    at = str(now_datetime())
+    result['events'] = [{'id': 'erp-read', 'module': 'control', 'phase': '单据读取与核算',
+        'kind': 'tool_result', 'at': at, 'summary': '实际读取本批现存、预留和工单，按两种保障顺序计算；尚未审批或执行。',
+        'query': {'doctype': 'Supply Case', 'name': case.name, 'scope': 'on_hand_only'},
+        'result_excerpt': json.dumps({'metrics': result['practice']['metrics'],
+            '_provenance': {'doctype': 'Supply Case', 'name': case.name, 'created_by': case.owner,
+                'created_at': str(case.creation), 'modified_by': case.modified_by,
+                'modified_at': str(case.modified), 'read_at': at,
+                'note': '服务器注册的虚拟业务数据；此记录为程序读取，不是模型或员工发言。'}}, ensure_ascii=False)}]
+    turn.result = json.dumps(result, ensure_ascii=False, default=str)
+    turn.insert(ignore_permissions=True)  # Only the owner-scoped conversation is written.
+    return resolution_payload(turn, result)
 
 
 def install():
@@ -404,7 +463,15 @@ def with_resolution(turn, result):
     """Append server-computed decisions, independently of model prose success."""
     from suke_ops import decision_result
     resolution = decision_result.build(turn, result)
-    return {**result, **({'resolution': resolution} if resolution else {})}
+    updated = {**result, **({'resolution': resolution} if resolution else {})}
+    if resolution and resolution.get('kind') == 'sandbox':
+        from suke_ops import supply_practice
+        from suke_ops.api import read_case
+        case = read_case(resolution['case']['name'])
+        summary = supply_practice.summary(case)
+        if summary:
+            updated['practice'] = {**summary, 'case_name': case.name, 'company': case.company}
+    return updated
 
 
 def resolution_payload(turn, result):
@@ -438,6 +505,7 @@ def resolution_action(name, action, plan_id=None, fingerprint=None, reason=None,
     frappe.db.savepoint('discussion_resolution')
     try:
         result = decision_result.act(turn, json.loads(turn.result or '{}'), action, **args)
+        result = with_resolution(turn, result)
         frappe.db.set_value('Agent Turn', name, 'result', json.dumps(result, ensure_ascii=False, default=str))
     except Exception:
         frappe.db.rollback(save_point='discussion_resolution')
