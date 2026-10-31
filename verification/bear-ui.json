@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "backend": "mock，仅验证界面与接口契约，不证明线上模型连通",
+  "results": [
+    {
+      "viewport": "1440x1000",
+      "status": "PASS"
+    },
+    {
+      "viewport": "390x844 touch",
+      "status": "PASS"
+    }
+  ]
+}
