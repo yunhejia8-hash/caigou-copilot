@@ -53,4 +53,3 @@ const fs = require('node:fs');
         console.log(JSON.stringify(results));
     } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
-

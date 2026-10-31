@@ -1,0 +1,60 @@
+{
+  "scenario_key": "connector-1286",
+  "title": "连接器跳票：200 改 120，哪张工单受影响？",
+  "synthetic": true,
+  "disclosure": "全部企业、人物、消息、单据和时间均为合成演示设定；未接入真实供应商聊天、邮件或企业单据。角色不是已核验的真实员工。",
+  "item": {"code": "CONN-24P-DEMO", "label": "24 针板端连接器（演示）", "uom": "件"},
+  "purchase_order": {"id": "PO-1286", "quantity": 1000, "received_quantity": 0, "original_due_date": "2026-11-03", "supplier_revised_date": "2026-11-05", "revised_date_status": "供应商演示消息提出的预计日期，非已落实到仓承诺"},
+  "inventory": {"on_hand": 780, "reserved": 420, "quality_hold": 160, "free": 200, "snapshot_at": "2026-11-02T09:09:00+08:00", "buckets_disjoint": true},
+  "requirements": [
+    {"id": "WO-A", "sales_order": "SO-A", "quantity": 240, "material_required_at": "2026-11-03T09:00:00+08:00", "customer_class": "重点客户（演示）", "issued_quantity": 0, "split_allowed": false},
+    {"id": "WO-B", "sales_order": "SO-B", "quantity": 320, "material_required_at": "2026-11-03T13:00:00+08:00", "customer_class": "普通客户（演示）", "issued_quantity": 0, "split_allowed": false}
+  ],
+  "protected_reservation": {"id": "RSV-C", "work_order": "WO-C", "sales_order": "SO-C", "quantity": 420, "material_required_at": "2026-11-06T08:00:00+08:00", "proposed_release": 160, "release_status": "待批准", "replacement_status": "补回来源与时间待确认"},
+  "sources": [
+    {
+      "id": "E01", "label": "采购订单 PO-1286", "at": "2026-11-02T08:45:00+08:00", "actor": "采购记录（演示）", "channel": "合成采购订单快照", "kind": "record", "status": "演示单据值", "related_records": ["PO-1286"],
+      "text": "采购连接器 1,000 件，已收 0 件，原计划 11 月 3 日到货。原订单没有可用于计算 11 月 3 日 09:00 或 13:00 前合格可用量的承诺时刻。", "version_label": "PO-1286 / 演示快照 v1"
+    },
+    {
+      "id": "E02", "label": "库存与状态快照", "at": "2026-11-02T09:09:00+08:00", "actor": "仓库记录（演示）", "channel": "合成库存台账", "kind": "record", "status": "演示单据值", "related_records": ["STK-1102", "RSV-C", "QI-160"],
+      "text": "账面库存 780 件，其中 420 件已预留给 C，160 件待检冻结；三个状态互不重叠。自由库存为 780−420−160＝200 件。预留与待检料尚未放行，不能当作自由库存。", "version_label": "STK-1102 / 09:09 快照"
+    },
+    {
+      "id": "E03", "label": "工单需求及销售关联", "at": "2026-11-02T09:00:00+08:00", "actor": "生管记录（演示）", "channel": "合成工单用料表", "kind": "record", "status": "演示单据值", "related_records": ["WO-A", "SO-A", "WO-B", "SO-B"],
+      "text": "WO-A 对应 SO-A，连接器未领料需求 240 件，11 月 3 日 09:00 前需要；WO-B 对应 SO-B，未领料需求 320 件，11 月 3 日 13:00 前需要。两工单均整批齐料，不拆批。销售订单与其工单是同一需求，不得相加；本次连接器需求合计 560 件。其他物料及后续生产、出货条件没有给出，因此连接器齐料不等于成品按时交付。", "version_label": "WO-A + WO-B / 用料 v1"
+    },
+    {
+      "id": "E04", "label": "C 订单预留记录", "at": "2026-11-02T09:00:00+08:00", "actor": "预留记录（演示）", "channel": "合成物料预留单", "kind": "record", "status": "预留生效，调整待批准", "related_records": ["RSV-C", "WO-C", "SO-C"],
+      "text": "420 件连接器预留给 WO-C / SO-C，原用料时点 11 月 6 日 08:00。没有已批准的延期或预留调整。候选方案申请释放其中 160 件后，会留下 260 件预留并形成 160 件补回责任；补回来源、时刻仍待确认。", "version_label": "RSV-C / 演示快照 v1"
+    },
+    {
+      "id": "E05", "label": "09:02 供应商首次通知", "at": "2026-11-02T09:02:00+08:00", "actor": "供应商业务员（演示角色）", "channel": "合成供应商私聊原文", "kind": "message", "status": "提前 200 仅为可能，尚未发货", "related_records": ["PO-1286"],
+      "text": "这批端子返工了，整批得晚两天。今晚可能先出 200，得等检验结果。先别给客户保证。", "version_label": "供应商消息 / 09:02", "claims": {"early_quantity": 200, "early_status": "tentative", "arrival_at": null, "usable_at": null}
+    },
+    {
+      "id": "E06", "label": "09:05 销售 A 要求", "at": "2026-11-02T09:05:00+08:00", "actor": "销售 A 负责人（演示角色）", "channel": "合成内部协同群原文", "kind": "message", "status": "客户要求转述，非已实现交付", "related_records": ["SO-A", "WO-A"],
+      "text": "A 客户明晚装机，240 套必须整批交。上周已经延过一次，这次优先保它。", "version_label": "协同群消息 / 09:05"
+    },
+    {
+      "id": "E07", "label": "09:07 生管回复", "at": "2026-11-02T09:07:00+08:00", "actor": "生管（演示角色）", "channel": "合成内部协同群原文", "kind": "message", "status": "需求时点确认于演示工单", "related_records": ["WO-A", "WO-B"],
+      "text": "A 明早九点上线，B 下午一点也要料。只保 A，B 那条线怎么排？请给我确定数量和时间。", "version_label": "协同群消息 / 09:07"
+    },
+    {
+      "id": "E08", "label": "09:09 仓管解释库存", "at": "2026-11-02T09:09:00+08:00", "actor": "仓管（演示角色）", "channel": "合成仓管私聊原文", "kind": "message", "status": "与演示库存快照相符", "related_records": ["STK-1102", "RSV-C", "QI-160"],
+      "text": "系统看到的 780 不能都拿。420 已经给 C 锁了，160 还在待检区，能直接发的只有 200。", "version_label": "仓管消息 / 09:09"
+    },
+    {
+      "id": "E09", "label": "09:12 C 客户延期转述", "at": "2026-11-02T09:12:00+08:00", "actor": "销售 C 负责人（演示角色）", "channel": "合成内部群消息：转述客户电话", "kind": "message", "status": "二手转述，未获书面确认或内部批准", "related_records": ["SO-C", "WO-C", "RSV-C"],
+      "text": "C 客户昨天电话说可能晚两天提货。我没拿到书面确认，你们别直接把它的料用了。", "version_label": "协同群消息 / 09:12", "claims": {"customer_delay_days": 2, "written_confirmation": false, "reservation_release_approved": false}
+    },
+    {
+      "id": "E10", "label": "09:16 品质复测回复", "at": "2026-11-02T09:16:00+08:00", "actor": "品质人员（演示角色）", "channel": "合成品质回复原文", "kind": "message", "status": "预计 11:00 回报结果，不是放行承诺", "related_records": ["QI-160"],
+      "text": "待检的 160 里有一项尺寸还没复测。十一点给结果，现在不能承诺能放多少。", "version_label": "品质消息 / 09:16", "claims": {"quantity_on_hold": 160, "expected_result_at": "2026-11-02T11:00:00+08:00", "released_quantity": null}
+    }
+  ],
+  "update_source": {
+    "id": "E11", "label": "10:18 供应商数量变更", "at": "2026-11-02T10:18:00+08:00", "actor": "供应商业务员（演示角色）", "channel": "合成供应商私聊补充原文", "kind": "message", "status": "供应商声称 120 可发；未取得出库、到仓或本厂放行凭证", "related_records": ["PO-1286"],
+    "text": "先发不了 200，检验通过的只有 120。今晚可以发这 120，其余还在返工。", "version_label": "供应商消息 / 10:18", "supersedes": "E05", "supersedes_scope": "提前批候选数量由 200 变为 120；旧消息仍保留。到仓、本厂检验和预留审批仍未确认。", "claims": {"early_quantity": 120, "early_status": "supplier_reports_can_ship", "supplier_inspection_passed": 120, "dispatched_quantity": null, "arrival_at": null, "usable_at": null}
+  }
+}
