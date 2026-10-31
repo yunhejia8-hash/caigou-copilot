@@ -9,6 +9,24 @@ import frappe
 from suke_ops import hub
 
 
+def with_action_result(provider):
+    """模拟模型在自然语言答复前报告行动结果；真实校验仍走运行时与数据库。"""
+    pending = {}
+    def wrapped(system, messages, tools):
+        key = id(messages)
+        if key in pending:
+            return pending.pop(key)
+        output = provider(system, messages, tools)
+        if output['stop_reason'] == 'end_turn':
+            pending[key] = output
+            return {'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': 'action-result',
+                    'name': 'report_action', 'input': {'status': 'analysis_only',
+                    'reason': '本轮仅核对模块数据，未请求创建业务单据。',
+                    'next_step': '如需建单，请指定来源单据和目标业务动作。'}}]}
+        return output
+    return wrapped
+
+
 def run():
     frappe.set_user('Administrator')
     checks = []
@@ -56,6 +74,9 @@ def run():
         assert draft['doctype'] == 'Purchase Receipt' and draft['__islocal']
         assert frappe.db.count('Purchase Receipt') == before
         checks.append('Agent打开真实收货映射草稿，不自动插入或提交单据')
+        restored_offer = hub.history(turn.conversation, 'stock')
+        assert restored_offer[0]['offers'] == [offer]
+        checks.append('刷新恢复历史时保留真实草稿按钮，不丢失可操作产出')
         assert hub.read_record('stock', 'Purchase Order', po.name)['name'] == po.name
         checks.append('库存Agent能读取待收货采购单，但只开放收货映射')
         original_get = frappe.get_cached_value
@@ -118,13 +139,50 @@ def run():
                          'input': {'module': module, 'question': '读取本模块面板'}} for module in hub.MODULE_DOCS]}
             return {'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': 'board', 'name': 'read_module_board', 'input': {}}]}
 
-        with patch('suke_ops.agent_runtime.request_model', provider):
+        with patch('suke_ops.agent_runtime.request_model', with_action_result(provider)):
             hub.run_turn(turn2.name)
         result = hub.poll(turn2.name)
         assert result['state'] == 'done', result
         assert {row['agent'] for row in result['trace']} == {'control', *hub.MODULE_DOCS}
-        assert len(result['trace']) == 8
+        assert len([row for row in result['trace'] if row['tool'] != 'model_request']) == 13
+        assert result['action']['status'] == 'analysis_only'
+        assert '已保存业务单据：0 张' in result['answer'] and '原因：' in result['answer']
         checks.append('总控实际委派四模块，四个独立Agent均调用各自业务工具（模型响应模拟）')
+        def call(tool, args, identity):
+            return {'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': identity,
+                    'name': tool, 'input': args}]}
+        final = {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '负责人给出选择后再处理。'}]}
+        board_call = call('read_module_board', {}, 'read-board')
+        blocked = call('report_action', {'status': 'blocked', 'reason': '销售与生产争料，优先级尚未决定。',
+                       'next_step': '请负责人选择销售优先或生产优先。'}, 'report-blocked')
+        ready = call('report_action', {'status': 'draft_ready', 'reason': '已提供采购单收货草稿入口。',
+                     'next_step': '打开草稿核对数量和仓库，再手动保存。'}, 'report-ready')
+        scenarios = [
+            ('阻碍必须显式展示', [board_call, blocked, final], 'done'),
+            ('没有入口不能声称已准备草稿', [board_call, ready], 'failed'),
+            ('反复分析但没有行动结果必须明确报错', [board_call, final, final, final, final], 'failed'),
+            ('实际草稿入口和行动结果共同恢复', [board_call,
+             call('offer_draft', {'action': 'receive_purchase', 'source': po.name}, 'offer'), ready, final], 'done'),
+        ]
+        for label, outputs, expected_state in scenarios:
+            probe = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': str(uuid.uuid4()),
+                                    'agent_module': 'stock', 'question': label, 'state': 'queued'}).insert(ignore_permissions=True)
+            names.append(probe.name)
+            frappe.db.commit()
+            iterator = iter(outputs)
+            with patch('suke_ops.agent_runtime.request_model', lambda *args: next(iterator)):
+                hub.run_turn(probe.name)
+            result = hub.poll(probe.name)
+            assert result['state'] == expected_state, result
+            if label == '阻碍必须显式展示':
+                assert result['action']['status'] == 'blocked'
+                assert '优先级尚未决定' in result['answer'] and '下一步：' in result['answer']
+            elif expected_state == 'failed':
+                assert ('实际草稿入口' if len(outputs) == 2 else '行动结果') in result['answer']
+            else:
+                assert len(result['offers']) == 1 and '可打开草稿入口：1 个' in result['answer']
+                assert hub.history(probe.conversation, 'stock')[0]['offers'] == result['offers']
+            checks.append(label + '（真实数据库与工具，模型响应模拟）')
         repeated = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': str(uuid.uuid4()),
                                    'agent_module': 'control', 'question': '重复委派预算验证', 'state': 'queued'}).insert(ignore_permissions=True)
         names.append(repeated.name)
@@ -138,7 +196,7 @@ def run():
                 output['content'].append({'type': 'tool_use', 'id': 'buying-again', 'name': 'ask_module',
                                           'input': {'module': 'buying', 'question': '换个问法再查采购'}})
             return output
-        with patch('suke_ops.agent_runtime.request_model', repeated_provider):
+        with patch('suke_ops.agent_runtime.request_model', with_action_result(repeated_provider)):
             hub.run_turn(repeated.name)
         assert hub.poll(repeated.name)['state'] == 'done'
         assert len(buying_requests) == 2, buying_requests
@@ -150,16 +208,17 @@ def run():
         def partial_provider(system, messages, tools):
             if '你是销售 Agent' in system:
                 raise RuntimeError('合成测试：销售服务暂不可用')
-            if tools[0]['name'] == 'ask_module' and len(messages) > 1:
+            if tools[0]['name'] == 'ask_module' and any(isinstance(message['content'], list) and any(block.get('type') == 'tool_result' for block in message['content']) for message in messages):
                 raise RuntimeError('合成测试：汇总失败')
             return provider(system, messages, tools)
-        with patch('suke_ops.agent_runtime.request_model', partial_provider):
+        with patch('suke_ops.agent_runtime.request_model', with_action_result(partial_provider)):
             hub.run_turn(partial.name)
         partial_result = hub.poll(partial.name)
         assert partial_result['state'] == 'done', partial_result
         assert '销售：本轮未核实' in partial_result['answer']
         assert '采购：已根据实际工具' in partial_result['answer']
-        assert any(row['tool'] == 'module_failed' for row in partial_result['trace'])
+        assert any(row['module'] == 'selling' and row['status'] == 'failed' for row in partial_result['modules'])
+        assert any(row['module'] == 'selling' and row['kind'] == 'failed' for row in partial_result['events'])
         checks.append('子模块失败不阻断其他模块，汇总失败保留已完成结论并标注未核实模块')
         report_turn = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': str(uuid.uuid4()),
                                      'agent_module': 'stock', 'question': '库存巡检', 'answer': '合成验收：库存问题需要总控协调', 'state': 'done'}).insert(ignore_permissions=True)
@@ -171,13 +230,14 @@ def run():
         names.append(control_report.name)
         frappe.db.commit()
         def report_provider(system, messages, tools):
-            if len(messages) == 1:
+            if not any(isinstance(message['content'], list) for message in messages):
+                assert len(messages) == 2 and '程序已按当前账号权限读取' in messages[-1]['content']
                 return {'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': 'reports', 'name': 'read_module_reports', 'input': {}}]}
             payload = json.loads(messages[-1]['content'][0]['content'])
             assert any(row['turn'] == report_turn.name for row in payload['reports'])
             assert len(payload['current_boards']) == 4
             return {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '已读取库存上报并核对四模块面板，建议负责人协调。'}]}
-        with patch('suke_ops.agent_runtime.request_model', report_provider):
+        with patch('suke_ops.agent_runtime.request_model', with_action_result(report_provider)):
             hub.run_turn(control_report.name)
         assert hub.poll(control_report.name)['state'] == 'done'
         checks.append('总控通过真实工具读取模块上报及四模块当前面板，生成协调建议')
@@ -201,17 +261,21 @@ def run():
             frappe.db.commit()
             def stage_provider(system, messages, tools):
                 assert '你是' + hub.runtime.MODULES[module] + ' Agent' in system
-                assert not any(tool['name'] in ('ask_module', 'offer_draft') for tool in tools)
+                assert not any(tool['name'] == 'ask_module' for tool in tools)
+                assert any(tool['name'] == 'create_material_request' for tool in tools) == (module == 'buying-demand')
+                expected_actions = {key for key in hub.DRAFTS if module in hub.draft_modules(key)}
+                offer_tool = next((tool for tool in tools if tool['name'] == 'offer_draft'), None)
+                assert (set(offer_tool['input_schema']['properties']['action']['enum']) if offer_tool else set()) == expected_actions
                 allowed = next(tool for tool in tools if tool['name'] == 'read_record')['input_schema']['properties']['doctype']['enum']
                 assert set(allowed) == set(hub.STAGE_DOCS[module] + hub.SHARED_DOCS)
                 assert 'Sales Order' not in allowed
-                assert len(messages) == 1 or isinstance(messages[-1]['content'], list), '不应读取同会话其他专项的历史'
-                if len(messages) == 1:
+                assert (len(messages) == 2 and all(row['role'] == 'user' for row in messages) and '程序已按当前账号权限读取' in messages[-1]['content']) or isinstance(messages[-1]['content'], list), '不应读取同会话其他专项的历史'
+                if len(messages) == 2:
                     return {'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': 'stage', 'name': 'read_module_board', 'input': {}}]}
                 payload = json.loads(messages[-1]['content'][0]['content'])
                 assert payload['module'] == module and payload['columns']
                 return {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': module + '已核对真实环节数据，待负责人决策。'}]}
-            with patch('suke_ops.agent_runtime.request_model', stage_provider):
+            with patch('suke_ops.agent_runtime.request_model', with_action_result(stage_provider)):
                 hub.run_turn(stage_turn.name)
             assert hub.poll(stage_turn.name)['state'] == 'done'
             restored_stage = hub.history(stage_conversation, module)

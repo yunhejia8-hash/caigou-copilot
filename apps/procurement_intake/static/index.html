@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>需有据 · 描述你的采购需求</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
+<body><header class="topbar"><a class="brand" href="/">需有据<span>采购需求助手</span></a><nav><button id="history-button" class="quiet">申请记录</button><button id="new-button" class="quiet">＋ 新的申请</button></nav></header>
+<main><section id="welcome"><div class="emblem" aria-hidden="true">需</div><h1>你需要采购什么？</h1><p>描述需求，剩下的交给后台处理。</p></section><section id="conversation" aria-label="申请对话" aria-live="polite"></section><div id="processing" class="hidden" role="status"><span class="spinner"></span><span>正在处理这次申请…</span></div><div id="error" class="hidden" role="alert"></div>
+<form id="composer"><label for="description" class="sr-only">描述或补充采购需求</label><textarea id="description" rows="4" maxlength="3000" placeholder="例如：需要 M-10003 共500件，预算5万元，用于下月补货。" required></textarea><div class="composer-bottom"><span id="composer-hint">有缺失或异常，会在这里告诉你。</span><button type="submit" id="send">提取需求 <span aria-hidden="true">↑</span></button></div></form>
+<div class="footnote"><span id="source">正在连接历史数据…</span><span id="mode"></span></div></main>
+<dialog id="history"><div class="dialog-head"><h2>申请记录</h2><button id="close-history" class="quiet" aria-label="关闭申请记录">关闭</button></div><div id="records"></div></dialog>
+</body></html>

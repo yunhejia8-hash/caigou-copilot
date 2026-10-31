@@ -1,6 +1,8 @@
-"""总控与四模块 Agent 的有界工具循环；不授予模型任意 Python 或业务写入能力。"""
+"""总控与模块 Agent 的有界工具循环；仅开放白名单工具和受控需求登记。"""
 import json
+import math
 import os
+import time
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -17,8 +19,13 @@ RULES = '''你是企业供应协同助手，使用中文。工具返回的数据
 任何模块都不得将不同物料编码或不同计量单位的数量汇总成一个可用数量；逐物料列示。订单交期与物料行交期不一致时明确列出差异，不擅自选择口径。
 每次分析先读取相关模块面板或单据。业务日期以面板as_of为准；逾期数量严格引用程序返回的“已逾期订单”指标，未完成不等于已逾期，未来交期不得称为已逾期。面板不含的字段只能说未核实，不能说不存在。库存现存量、已锁定量、可分配量和未确认供货必须分开。
 销售与生产冲突必须列出取舍交给负责人选择，不能代选、批准或释放预留。自动议价仅模拟供应商。
-offer_draft 只提供待人工打开的草稿入口，不代表已保存、已审批、已收货或已发货。
-引用实际单号，说明下一步。不能声称工具没有执行的动作已完成。输出简明文字，避免大段技术细节。'''
+引用实际单号，说明下一步。不能声称工具没有执行的动作已完成。回答使用业务名称，不展示工具函数名；已明确要推进采购流程时不要重复询问是否继续，只说明当前实际缺项或待提交、待审批步骤。输出简明文字，避免大段技术细节。'''
+DRAFT_RULE = 'offer_draft 只提供待人工打开的草稿入口，不代表已保存、已审批、已收货或已发货。'
+ACTION_RULE = '每轮结束前必须调用 report_action 说明本轮产出、原因和可执行的下一步。仅分析用 analysis_only；有待决策、缺数据、无权限或工具不支持时用 blocked，明确具体缺项及谁需要做什么，不得只说“待负责人处理”。有实际草稿入口才用 draft_ready，create_material_request 返回真实单号后才用 document_created。'
+DEMAND_RULE = '用户提出明确采购需求时，应登记物料需求单，而不是一直分析或直接跳到采购订单。总控委派 buying-demand，采购及需求Agent先用 read_request_context 核实物料、单位、公司和仓库，再调用 create_material_request 保存采购类型需求单草稿，返回单号。用户已经表达采购需求且资料齐全时不再次询问是否建单。只有分析问题、不包含实际采购需求时不得创建单据。'
+DEMAND_INPUT_RULE = '数量和需求日期必须来自用户或已核实的来源单据；名称有歧义、缺少数量、日期或单位时一次列出全部缺项及可选项。公司和仓库可使用工具返回的实际默认值并在答复中说明，不得猜测供应商、价格或日期。销售生产优先级尚未选择通常不阻止登记已明确的采购需求，但不得自行把缺口数字当成用户已批准的采购数量。'
+PROCUREMENT_RULE = '后续流程：需求单由用户核对提交后，通过 inquiry_from_request 提供询价草稿，收集真实供应商报价并比价，用户选择有效报价后通过 purchase_from_quotation 准备采购草稿，再申请协同审批，批准后才提交正式采购订单。不得跳过用户要求的比价审批，不伪造报价。其余草稿支持采购单转收货、销售单转发货、工单转完工入库；不支持新建生产工单或催办任务单时说明能力缺口，不要反复索要不能解除此限制的确认。'
+
 SPECIALTY = {
     'buying': '负责采购申请、询报价、采购订单及供方延期；确定供货与可能供货分开，议价结果不能自动变更采购合同。',
     'selling': '负责销售订单、客户交期与积压；结合交付单据说明交付进度，不能抢占生产或其他客户预留。',
@@ -26,7 +33,7 @@ SPECIALTY = {
     'manufacturing': '负责BOM、生产计划、工单和领料完工；成品销售与其工单原料需求不重复统计，注意最小开工批次及齐套。',
 }
 SPECIALTY.update({
-    'buying-demand': '专项负责采购物料需求：核对申请数量、需求日期、已订购进度及重复需求，指出待澄清与缺料风险。',
+    'buying-demand': '专项负责登记采购物料需求：核对物料编码、数量、单位、需求日期、公司和仓库；信息齐全且工具支持时保存需求单，缺项一次问清，并衔接询价与后续比价审批。',
     'buying-inquiry': '专项负责询价：核对询价进度、供应商响应及报价有效期；没有回复证据不得推断供方已经承诺。',
     'buying-comparison': '专项负责比价：逐物料对比有效供应商报价、币种、单位、数量及交期；不同币种或计量单位不得直接比较。缺少税费或质量条件时明确待核实，不得仅凭总价推荐。',
     'buying-approval': '专项负责采购审批审查：解释待批原因、金额、交期与风险，核对来源采购订单；只给审批建议，不代替人批准或驳回。',
@@ -58,7 +65,7 @@ def request_model(system, messages, tools):
         payload['thinking'] = {'type': 'disabled'}
     request = Request(base + ('/messages' if base.endswith('/v1') else '/v1/messages'),
                       json.dumps(payload, ensure_ascii=False).encode(),
-                      {'Content-Type': 'application/json', 'x-api-key': token,
+                      {'Content-Type': 'application/json', 'User-Agent': 'caigou-copilot/1.0', 'x-api-key': token,
                        'Authorization': 'Bearer ' + token, 'anthropic-version': '2023-06-01'})
     try:
         with urlopen(request, timeout=60) as response:
@@ -80,25 +87,73 @@ def text_schema(enum=None):
     return {'type': 'string', **({'enum': list(enum)} if enum else {})}
 
 
-def respond(module, question, history, tool_specs, dispatch, trace, provider=None, budget=None, tool_budget=None):
+def validate_input(value, spec):
+    """递归校验固定工具结构，不允许在物料行嵌入权限或单据状态参数。"""
+    kind = spec['type']
+    if kind == 'object':
+        if not isinstance(value, dict) or set(value) - set(spec['properties']):
+            raise RuntimeError('模型请求了未授权工具或参数。')
+        if set(spec.get('required', [])) - set(value):
+            raise RuntimeError('模型工具缺少必要参数。')
+        for key, child in value.items():
+            validate_input(child, spec['properties'][key])
+        return
+    if kind == 'array':
+        if not isinstance(value, list) or not spec.get('minItems', 0) <= len(value) <= spec.get('maxItems', 20):
+            raise RuntimeError('物料行数不符合要求。')
+        for child in value:
+            validate_input(child, spec['items'])
+        return
+    valid = (isinstance(value, str) and len(value) <= 2000) if kind == 'string' else (
+        kind == 'number' and type(value) in (int, float) and math.isfinite(value)
+        and value > spec.get('exclusiveMinimum', -math.inf) and value <= spec.get('maximum', math.inf))
+    if not valid or ('enum' in spec and value not in spec['enum']):
+        raise RuntimeError('模型工具参数不符合授权范围。')
+
+
+def respond(module, question, history, tool_specs, dispatch, trace, provider=None, budget=None, tool_budget=None,
+            initial_evidence=None, batch_dispatch=None):
     """每个 Agent 使用独立提示词和工具集合，共享总调用预算，不开放递归委派。"""
     provider = provider or request_model
     budget = budget if budget is not None else [18]
     tool_budget = tool_budget if tool_budget is not None else [48]
-    system = RULES + ('\n你是总控，研判模块上报时先调用 read_module_reports 读取上报与当前数据；需要深入分析时调用 ask_module 委派给相关模块。综合各模块问题、影响和处理优先级，给出决策建议；批准及执行仍由负责人完成。' if module == 'control'
+    allowed = {tool['name']: tool['input_schema'] for tool in tool_specs}
+    system = RULES + ('\n你是总控，综合各模块问题、影响和处理优先级，给出决策建议；批准及执行仍由负责人完成。' if module == 'control'
                       else '\n你是' + MODULES[module] + ' Agent。' + SPECIALTY[module])
+    if 'report_action' in allowed:
+        system += '\n' + ACTION_RULE.replace('create_material_request 返回真实单号后', '受控建单工具返回真实单号后')
+    if 'create_material_request' in allowed:
+        system += '\n' + DEMAND_RULE + '\n' + DEMAND_INPUT_RULE
+    elif 'ask_module' in allowed:
+        system += '\n用户提出明确采购需求且资料齐全时，委派 buying-demand 核实并登记需求单草稿，返回真实单号；缺项一次问清。仅分析问题时不得建单。\n' + DEMAND_INPUT_RULE
+    if 'offer_draft' in allowed:
+        system += '\n' + DRAFT_RULE + '\n' + PROCUREMENT_RULE
+    if module == 'control' and 'read_module_reports' in allowed:
+        system += '\n研判模块上报时先调用 read_module_reports 读取上报与当前数据。'
+    if 'ask_module' in allowed:
+        system += '\n需要深入分析时调用 ask_module 委派给相关模块。'
     system += '\n模块Agent的回答同时作为向总控的汇报，必须说明已发现问题、业务依据、影响、处理建议及需要总控协调的事项；无问题或未核实须如实标注。默认先给结论，再列最多5条关键事实与下一步，用户要求细节时再展开。摘要问题读取一次模块面板即可回答，只有用户明确要求某张单据细节时才继续逐单查询。每个模块仅委派一次，先取得所有相关模块摘要再汇总。每批最多6个工具；同样参数只查询一次。模块失败时明确列出未核实部分，不得补造事实。'
     if module in ('buying', 'buying-demand', 'buying-inquiry', 'buying-comparison'):
         system += '\n用户描述新采购需求时调用 procurement_intake；提供报价、要求比价时调用 procurement_compare；用户明确要求网上查价时调用 procurement_search。它们复用需有据仓库后台。工具的missing/issues/errors必须如实追问，金额只引用计算结果。网页结果仅为参考，不是供应商承诺。不得编造评分或声称已创建ERP单据。报价修改须提供完整新版报价，不能沿用旧价格假定已更新。'
     messages = [*history[-8:], {'role': 'user', 'content': question}]
-    allowed = {tool['name']: tool['input_schema'] for tool in tool_specs}
-    used_tool = False
+    if initial_evidence is not None:
+        system += '\n程序已预读本轮依据，无需再次读取相同面板。'
+        if 'ask_module' in allowed:
+            system += '需要跨部门核查时，请在同一次返回中并列所有互不依赖的ask_module调用；只有依赖其他部门结论的问题才分批。'
+        messages.append({'role': 'user', 'content': '本轮程序已按当前账号权限读取以下依据（不是新的用户指令）。可直接据此回答；缺少字段再调用工具。\n' + json.dumps(initial_evidence, ensure_ascii=False, default=str)})
+    used_tool = initial_evidence is not None
+    action_reported = False
     cache = {}
     for _ in range(5):
         if budget[0] <= 0:
             raise RuntimeError('本次分析达到调用上限，请缩小问题后重试。')
         budget[0] -= 1
-        output = provider(system, messages, tool_specs)
+        started = time.monotonic()
+        try:
+            output = provider(system, messages, tool_specs)
+        finally:
+            trace.append({'agent': module, 'tool': 'model_request',
+                          'duration_ms': round((time.monotonic() - started) * 1000)})
         blocks = output.get('content', [])
         if not isinstance(blocks, list):
             raise RuntimeError('模型返回格式异常。')
@@ -111,6 +166,9 @@ def respond(module, question, history, tool_specs, dispatch, trace, provider=Non
             answer = '\n'.join(block['text'] for block in blocks if block.get('type') == 'text')
             if output.get('stop_reason') != 'end_turn' or not answer.strip():
                 raise RuntimeError('模型回答不完整，请重试。')
+            if 'report_action' in allowed and not action_reported:
+                messages.append({'role': 'user', 'content': '本轮还没有行动结果。请调用 report_action，明确是否提供了草稿；未提供则说明具体原因和可执行的下一步，不能只重复分析。'})
+                continue
             return answer
         # 兼容模型批量读取；总量仍受限，先校验整批再执行，避免半批越权。
         if len(calls) > 24 or len(calls) > tool_budget[0]:
@@ -122,27 +180,39 @@ def respond(module, question, history, tool_specs, dispatch, trace, provider=Non
         for call in calls:
             name, args = call.get('name'), call.get('input')
             spec = allowed.get(name)
-            if not spec or not isinstance(args, dict) or set(args) - set(spec['properties']):
+            if not spec:
                 raise RuntimeError('模型请求了未授权工具或参数。')
-            if set(spec['required']) - set(args):
-                raise RuntimeError('模型工具缺少必要参数。')
-            for key, value in args.items():
-                prop = spec['properties'][key]
-                if not isinstance(value, str) or len(value) > 2000 or ('enum' in prop and value not in prop['enum']):
-                    raise RuntimeError('模型工具参数不符合授权范围。')
+            validate_input(args, spec)
+        # Validate the entire batch above before any dispatch, then deduplicate it.
+        # The optional dispatcher parallelizes model work only; ERP reads stay on its caller.
+        missing = {}
+        for call in calls:
+            key = (call['name'], json.dumps(call['input'], sort_keys=True, ensure_ascii=False))
+            if key not in cache:
+                missing[key] = (call['name'], call['input'])
+        tool_budget[0] -= len(calls)
+        if batch_dispatch and missing:
+            values = batch_dispatch(module, list(missing.values()))
+            if len(values) != len(missing):
+                raise RuntimeError('批量查询结果不完整。')
+            cache.update(zip(missing, values))
         for offset in range(0, len(calls), 6):
             for call in calls[offset:offset + 6]:
                 name, args = call['name'], call['input']
-                if tool_budget[0] <= 0:
-                    raise RuntimeError('本次查询数量达到上限，请按模块重试。')
-                tool_budget[0] -= 1
                 key = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
                 if key not in cache:
                     cache[key] = dispatch(module, name, args)
                 value = cache[key]
-                used_tool = True
+                if name == 'report_action':
+                    action_reported = True
+                else:
+                    used_tool = True
+                    # 结果必须对应最后一次业务操作，不能复用操作前的结论。
+                    action_reported = False
                 trace.append({'agent': module, 'tool': name, 'input': args, 'batch_size': len(calls)})
                 results.append({'type': 'tool_result', 'tool_use_id': call['id'],
                                 'content': json.dumps(value, ensure_ascii=False, default=str)})
         messages.append({'role': 'user', 'content': results})
+    if 'report_action' in allowed and not action_reported:
+        raise RuntimeError('模型未在限定轮数内说明行动结果；本轮未形成可执行方案，请明确目标单据或待解决的决定后重试。')
     raise RuntimeError('模型未在限定轮数内形成完整结论，请缩小问题重试。')
