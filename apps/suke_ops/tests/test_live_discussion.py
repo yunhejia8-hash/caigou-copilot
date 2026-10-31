@@ -34,3 +34,14 @@ class DiscussionTests(unittest.TestCase):
         self.assertTrue(result['partial'])
         self.assertNotIn('secret', str(result))
         self.assertTrue(all(row['status'] == 'failed' for row in result['discussion']))
+
+    def test_first_case_uses_program_conclusion_even_if_model_is_wrong(self):
+        def provider(system, messages, tools):
+            if isinstance(messages[-1]['content'], str):
+                return {'content': [{'type': 'tool_use', 'id': 'read', 'name': 'read_evidence', 'input': {}}]}
+            return {'content': [{'type': 'text', 'text': '09:00晚于10:00，没有隐性费用'}], 'stop_reason': 'end_turn'}
+        result = discuss(evidence(0, True), '测试', lambda rows: None, provider)
+        self.assertNotIn('09:00晚于10:00', result['answer'])
+        self.assertIn('其他损失与隐性费用未核实', result['answer'])
+        self.assertIn('09:00晚于10:00', result['discussion'][-1]['answer'])
+        self.assertTrue(result['review_required'])

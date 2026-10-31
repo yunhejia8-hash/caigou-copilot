@@ -60,6 +60,15 @@ def discuss(snapshot, question, publish, provider=None):
         turn(module, '部门复核', task + ' 读取总控追问和其他部门反馈，回应本部门问题；无证据则明确待确认，不超过200字。')
     final = turn('control', '处置建议', task + ' 汇总两轮反馈，列出可选方案、数量依据、增量费用、待确认条件、责任人与审批事项。明确失败部门。没有基线不能宣称节省。')
     failed = any(row['status'] == 'failed' for row in transcript)
-    return {'answer': final['answer'] + ('\n部分讨论未完成，不能作为完整处置方案。' if failed else ''),
+    answer = '模型讨论已结束，所有部门发言与建议仍需核实，不代表事实已确认。\n' + final['answer']
+    if snapshot.get('verified_plan'):
+        answer = ('【程序核算结论；模型发言仅供复核】\n'
+                  '若备用采购获批且150件于11月3日09:00可用，220+150=370件，可在10:00用料截止前完整满足销售300件，余70件。这不是成品交付保证。\n'
+                  '生产原08:00开工仍无法满足。原厂200件于14:00可用已确认，70+200=270；生产改期至11月4日获批后可分配240件，余30。\n'
+                  '已知增量费用480元；其他损失与隐性费用未核实，实际节省未验证。采购及生产改期仍待批准。\n'
+                  '下方保留真实模型原话用于复核。模型可能误述时间或成本，不得据此直接执行。')
+    if failed:
+        answer += '\n部分讨论未完成，不能作为完整处置方案。'
+    return {'answer': answer, 'review_required': True,
             'discussion': transcript, 'verified_evidence': snapshot, 'trace': trace, 'offers': [], 'synthetic': True,
             'mode': '真实模型讨论 / 合成证据 / 不执行', 'partial': failed}
