@@ -47,6 +47,25 @@ test('context counts toward server limit; original homepage questions are unchan
     assert.equal(h.calls.length,0); assert.equal(messages.length,1);
     const home=sender(Hub,{caseName:'',text:'查看采购申请'});await home.send();assert.equal(home.calls[0].args.question,'查看采购申请');
 });
+
+test('procurement context is opt-in and isolated from the original conversation', async () => {
+    const {Hub} = environment(); Hub.prototype.refresh = Hub.prototype.restore = () => {};
+    const home = new Hub({main:{}}), flow = new Hub({main:{}}, 'chat', 'buying', {procurementProcess:'PROC-A'});
+    assert.notEqual(home.key,flow.key);
+    const normal=sender(Hub,{caseName:'',text:'查看采购进度'});await normal.send();
+    assert.equal('procurement_process' in normal.calls[0].args,false);
+    const scoped=sender(Hub,{caseName:'',text:'核实这笔采购'});
+    scoped.procurementProcess='PROC-A';scoped.options={procurementStage:'receipt'};
+    await scoped.send();
+    assert.equal(scoped.calls[0].args.procurement_process,'PROC-A');
+    assert.equal(scoped.calls[0].args.procurement_stage,'receipt');
+});
+
+test('procurement navigation is separate from the new-conversation handler', () => {
+    const source=fs.readFileSync(path.join(publicDir,'hub.js'),'utf8');
+    const entry=source.match(/<a class="([^"]+)"[^>]*href="\/desk\/buying\/procurement-workspace"/);
+    assert.ok(entry);assert.equal(entry[1].split(/\s+/).includes('hub-new'),false);
+});
 test('opening dialog refuses unsaved or dirty forms before loading resources', async () => {
     const handlers = {}, messages = []; let loads = 0;
     const context = {frappe:{utils:{escape_html:String},ui:{form:{on:(type,h)=>{handlers[type]=h;}}},

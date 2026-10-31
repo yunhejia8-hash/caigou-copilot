@@ -235,7 +235,7 @@ def owned_turn(name):
 
 
 @frappe.whitelist(methods=['POST'])
-def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None):
+def start(question, module='control', conversation=None, request_id=None, scenario_id=None, scenario_updated=False, previous_turn=None, human_note=None, procurement_process=None, procurement_stage='order'):
     require_user()
     check_module(module, control=True)
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
@@ -270,6 +270,14 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         scenario['verified_plan'] = {}
         scenario['calculation'] = {'status': '已有人员补充；旧计算已暂停，需重新核实输入。'}
         scenario['evidence_precedence'] = '原证据为历史基线；人员补充尚未核实，不自动覆盖原约束，不直接执行。'
+    procurement_context = None
+    if procurement_process:
+        from suke_ops.procurement_api import overview
+        from suke_ops.procurement import STAGES
+        if scenario or module not in ('buying', 'control') or procurement_stage not in STAGES:
+            frappe.throw('采购流程上下文仅适用于采购或总控的业务对话')
+        overview(procurement_process)  # 服务端检查公司和每张来源单据权限。
+        procurement_context = {'process': procurement_process, 'stage': procurement_stage}
     conversation = str(uuid.UUID(conversation)) if conversation else str(uuid.uuid4())
     request_id = str(uuid.UUID(request_id)) if request_id else str(uuid.uuid4())
     key = hashlib.sha256((frappe.session.user + ':' + request_id).encode()).hexdigest()
@@ -287,7 +295,7 @@ def start(question, module='control', conversation=None, request_id=None, scenar
         frappe.db.set_value('Agent Turn', row.name, {'state': 'failed', 'answer': '分析超时，请重新发送。'})
     doc = frappe.get_doc({'doctype': 'Agent Turn', 'conversation': conversation, 'request_key': key,
                          'agent_module': module, 'question': question.strip(), 'state': 'queued',
-                         'result': json.dumps({'scenario': scenario}, ensure_ascii=False) if scenario else None}).insert(ignore_permissions=True)
+                         'result': json.dumps({'scenario': scenario} if scenario else {'procurement_context': procurement_context}, ensure_ascii=False) if scenario or procurement_context else None}).insert(ignore_permissions=True)
     frappe.enqueue('suke_ops.hub.run_turn', queue='long', timeout=900, enqueue_after_commit=True,
                    job_id='agent-' + doc.name, name=doc.name)
     return {'name': doc.name, 'conversation': conversation}
@@ -629,8 +637,17 @@ def run_turn(name):
                    + '\n原因：' + action['reason'] + '\n\n下一步：' + action['next_step'])
         if documents:
             answer += '\n\n物料需求单：' + '、'.join(row['name'] + ('（复用已有单据）' if row['reused'] else '（已保存，未提交）') for row in documents)
+        knowledge = None
+        if stored.get('procurement_context'):
+            from suke_ops.procurement_api import safe_advice
+            knowledge = safe_advice(**stored['procurement_context'])
+            references = [*knowledge.get('rules', []), *knowledge.get('experiences', [])]
+            # 参考由程序附加，不把经验文本变成模型指令；普通聊天完全不走此分支。
+            answer += '\n\n采购经验参考：' + ('；'.join(row['name'] + '：' + (row.get('source_excerpt', '') + ('（原文已截断，请查看来源）' if row.get('excerpt_truncated') else '') if row.get('legacy') else row['recommendation']) for row in references) if references else knowledge.get('note', '暂无适用的已核实经验'))
+            answer += '\n历史参考不覆盖当前事实和人工审批。'
         frappe.db.set_value('Agent Turn', name, {'state': 'done', 'answer': answer,
                             'result': json.dumps({'trace': trace, 'offers': offers, 'modules': module_results, 'events': events, 'action': action, 'documents': documents,
+                                **({'knowledge': knowledge, 'procurement_context': stored['procurement_context']} if knowledge else {}),
                                 'timing': {'total_ms': round((time.monotonic()-run_started)*1000),
                                            'model_calls': sum(row.get('tool') == 'model_request' for row in trace)}}, ensure_ascii=False, default=str)})
     except Exception as error:

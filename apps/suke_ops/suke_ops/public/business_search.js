@@ -129,17 +129,44 @@
             });
         }
         const params = new URLSearchParams(window.location.search);
-        if (params.get('business_search') === '1') {
-            const options = {q: params.get('q') || '', entry: params.get('entry') || ''};
+        // 清理旧版本遗留参数，页面加载和模块切换均不主动弹窗。
+        if (params.get('business_search') === '1' || frappe.route_options?.business_search === '1') {
             for (const key of ['business_search', 'q', 'entry']) params.delete(key);
+            if (frappe.route_options?.business_search === '1') {
+                for (const key of ['business_search', 'q', 'entry']) delete frappe.route_options[key];
+            }
             const url = window.location.pathname + (params.size ? '?' + params.toString() : '') + window.location.hash;
             window.history.replaceState(window.history.state, '', url);
-            frappe.business_search.open(options);
         }
     }
+    function openSearchResult(event, input, route) {
+        if (!route) return;
+        const url = new URL(route, window.location.origin);
+        if (url.origin !== window.location.origin || url.searchParams.get('business_search') !== '1') return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        $(input).val('').closest('.modal').modal('hide');
+        frappe.business_search.open({q: url.searchParams.get('q') || '', entry: url.searchParams.get('entry') || ''});
+    }
+    // 拦截原生结果链接的默认跳转，只在搜索弹窗内部响应主动点击。
+    document.addEventListener('click', event => {
+        const link = event.target.closest?.('a[href]');
+        const input = link?.closest('.modal')?.querySelector('#navbar-search');
+        if (input) openSearchResult(event, input, link.getAttribute('href'));
+    }, true);
+    // 键盘确认与鼠标点击使用相同逻辑，不留下路由参数。
+    document.addEventListener('awesomplete-select', event => {
+        const input = event.target;
+        if (input.id !== 'navbar-search') return;
+        const item = input.awesomplete?.get_item(event.text?.value);
+        openSearchResult(event, input, Array.isArray(item?.route) ? item.route[0] : item?.route);
+    }, true);
     $(document).on('app_ready', installEntry);
     // 原生搜索弹窗可能在首次点击时才创建，显示后再挂载目录入口。
     $(document).on('shown.bs.modal', '.modal', installEntry);
     frappe.after_ajax(installEntry);
-    frappe.router.on('change', () => setTimeout(installEntry, 0));
+    frappe.router.on('change', () => {
+        dialog?.hide();
+        setTimeout(installEntry, 0);
+    });
 })();

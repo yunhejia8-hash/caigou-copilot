@@ -16,7 +16,9 @@ def verify(base_url):
     if missing:
         raise RuntimeError('静态资源清单缺少：' + ', '.join(sorted(missing)))
     assets = sorted(set(manifest.values()) | {'/assets/suke_ops/hub.js', '/assets/suke_ops/hub.css',
-                    '/assets/suke_ops/business_search.js', '/assets/suke_ops/business_search.css'})
+                    '/assets/suke_ops/bear-pet.js', '/assets/suke_ops/bear-control.js',
+                    '/assets/suke_ops/business_search.js', '/assets/suke_ops/business_search.css',
+                    '/assets/suke_ops/procurement.js', '/assets/suke_ops/procurement.css'})
     for path in assets:
         # 只请求本部署的静态资源，禁止清单引导请求外部地址。
         parsed = urlparse(path)

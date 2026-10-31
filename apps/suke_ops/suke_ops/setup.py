@@ -97,6 +97,8 @@ def install():
     install_approval()
     from suke_ops.hub import install as install_hub
     install_hub()
+    from suke_ops.procurement_setup import install as install_procurement
+    install_procurement()
     frappe.reload_doc('buying', 'page', 'operations_hub')
     customize_navigation()
     repair_existing_reservations()
