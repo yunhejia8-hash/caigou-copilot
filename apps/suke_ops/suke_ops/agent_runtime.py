@@ -141,6 +141,10 @@ def respond(module, question, history, tool_specs, dispatch, trace, provider=Non
         system += '\n' + DEMAND_TURN_RULE
     if 'offer_draft' in allowed:
         system += '\n' + DRAFT_RULE + '\n' + PROCUREMENT_RULE
+    if 'compare_supply_case' in allowed:
+        system += '\n供应延期、缺料或销售生产争料时，核对实际异常及来源单据，再调用 compare_supply_case 取得结构化方案；没有准确关联的异常则明确待关联，不凭“600件”等数量猜单。结果卡由程序提供，用户选择后仍须审批；不能把分配批准称作采购订单已批准。原单延期或可能先发不等于新增采购需求，不得重复购买。'
+    elif 'ask_module' in allowed:
+        system += '\n供应延期或销售生产争料时，委派采购核对实际供应异常并取得程序比较的方案，保留销售、库存和生产的核查。最后说明待用户选择的取舍；未核实到货不能算确定库存，未找到准确异常时不得猜单或宣称已审批。'
     if module == 'control' and 'read_module_reports' in allowed:
         system += '\n研判模块上报时先调用 read_module_reports 读取上报与当前数据。'
     if 'ask_module' in allowed:

@@ -24,7 +24,7 @@ permission_query_conditions = {name: 'suke_ops.procurement_api.private_query' fo
                                ('Procurement Process', 'Procurement Experience', 'Procurement Rule')}
 
 # 企业ERP只读快照；与采购闭环共存，不重写已有钩子。
-after_migrate = [after_migrate, 'suke_ops.finance_sync.setup.install']
+after_migrate = [after_migrate, 'suke_ops.finance_sync.setup.install', 'suke_ops.supply_practice.install']
 scheduler_events = {'cron': {'*/15 * * * *': ['suke_ops.finance_sync.service.scheduled']}}
 doc_events['ERP Connection'] = {'validate': 'suke_ops.finance_sync.service.validate_connection'}
 for finance_doctype in ('External ERP Snapshot', 'ERP Sync Run'):

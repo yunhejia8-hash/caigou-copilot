@@ -45,7 +45,16 @@ def allocate(ctx, priority):
     pools += [dict(r, current=False) for r in ctx['supplies'] if r['confirmed'] and r['qty'] > 0]
     pools.sort(key=lambda r: datetime.fromisoformat(r['eta']))
     # 同一销售订单对应的成品需求不进入原料需求集，只有其工单 BOM 消耗进入。
-    demands = sorted(ctx['demands'], key=lambda r: (0 if r['kind'] == priority else 1, 0 if r.get('priority') == '重点客户' else 1, datetime.fromisoformat(r['need_by']), r['id']))
+    def rank(row):
+        due = datetime.fromisoformat(row['need_by'])
+        important = 0 if row.get('priority') == '重点客户' else 1
+        kind = 0 if row['kind'] == priority else 1
+        if ctx.get('scope') == 'on_hand_only':
+            # A key customer's finished-goods demand is represented by its WO.
+            # Production-first instead respects the earlier material need time.
+            return (important, kind, due, row['id']) if priority == 'sales' else (kind, due, important, row['id'])
+        return (kind, important, due, row['id'])
+    demands = sorted(ctx['demands'], key=rank)
     rows = []
     for demand in demands:
         own = min(locked.get(demand['id'], 0), demand['qty'])

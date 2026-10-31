@@ -93,6 +93,32 @@ class SupplyTests(unittest.TestCase):
         self.assertEqual(negotiate_simulated(600, '2026-10-31', '2026-11-03', 23, 1)['status'], 'needs_human')
         self.assertEqual(negotiate_simulated(600, '2026-10-31', '2026-11-03', refusal=True)['status'], 'needs_human')
 
+    def test_on_hand_key_customer_work_order_differs_from_earliest_production(self):
+        ctx = {'scope': 'on_hand_only', 'as_of': '2026-11-01T09:00:00+08:00',
+               'actual_qty': 620, 'blocked_qty': 0, 'supplies': [],
+               'reservations': [{'demand_id': 'C', 'qty': 420}],
+               'demands': [
+                   {'id': 'A', 'kind': 'production', 'qty': 240, 'priority': '重点客户',
+                    'need_by': '2026-11-02T13:00:00+08:00', 'min_batch_qty': 100},
+                   {'id': 'B', 'kind': 'production', 'qty': 320, 'priority': '明日开工',
+                    'need_by': '2026-11-02T09:00:00+08:00', 'min_batch_qty': 100},
+                   {'id': 'C', 'kind': 'production', 'qty': 420,
+                    'need_by': '2026-11-06T09:00:00+08:00', 'min_batch_qty': 100}]}
+        sales, production = compare(ctx)['plans']
+        by_id = lambda plan: {row['id']: row for row in plan['allocations']}
+        self.assertEqual(by_id(sales)['A']['current_new_qty'], 200)
+        self.assertEqual(by_id(sales)['B']['current_new_qty'], 0)
+        self.assertEqual(by_id(production)['A']['current_new_qty'], 0)
+        self.assertEqual(by_id(production)['B']['current_new_qty'], 200)
+        for plan in (sales, production):
+            self.assertEqual(plan['shortage_qty'], 360)
+            self.assertEqual(plan['current_free_qty'], 200)
+            self.assertEqual(by_id(plan)['C']['locked_qty'], 420)
+            self.assertEqual(by_id(plan)['C']['current_new_qty'], 0)
+        # Legacy scope retains its existing ordering, including customer priority.
+        ctx.pop('scope')
+        self.assertEqual(by_id(allocate(ctx, 'production'))['A']['current_new_qty'], 200)
+
 
 if __name__ == '__main__':
     unittest.main()
