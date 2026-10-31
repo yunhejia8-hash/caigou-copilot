@@ -26,6 +26,33 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.trace[0]['agent'], 'buying')
 
+    def test_action_result_required_after_analysis(self):
+        self.spec.append(schema('report_action', '说明行动结果', {
+            'status': text_schema(['blocked', 'analysis_only', 'draft_ready']),
+            'reason': text_schema(), 'next_step': text_schema()}, ['status', 'reason', 'next_step']))
+        vague = {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '负责人给出选择后再处理。'}]}
+        with self.assertRaisesRegex(RuntimeError, '行动结果'):
+            self.run_agent([self.output(), vague, vague, vague, vague])
+
+    def test_action_result_is_not_business_evidence(self):
+        self.spec.append(schema('report_action', '说明行动结果', {
+            'status': text_schema(), 'reason': text_schema(), 'next_step': text_schema()},
+            ['status', 'reason', 'next_step']))
+        action = self.output('report_action', {'status': 'blocked', 'reason': '缺少来源单据', 'next_step': '请提供单号'})
+        vague = {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '暂未建单'}]}
+        with self.assertRaises(RuntimeError):
+            self.run_agent([action, vague, vague, vague, vague])
+
+    def test_missing_action_is_repaired_before_success(self):
+        self.spec.append(schema('report_action', '说明行动结果', {
+            'status': text_schema(), 'reason': text_schema(), 'next_step': text_schema()},
+            ['status', 'reason', 'next_step']))
+        answer = {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '暂未建单'}]}
+        action = self.output('report_action', {'status': 'blocked', 'reason': '销售和生产争料',
+                                             'next_step': '请负责人选择销售优先或生产优先'})
+        self.assertEqual(self.run_agent([self.output(), answer, action, answer]), '暂未建单')
+        self.assertEqual([call[1] for call in self.calls], ['read', 'report_action'])
+
     def test_unknown_tool_cannot_execute(self):
         with self.assertRaises(RuntimeError):
             self.run_agent([self.output('submit_purchase')])
@@ -93,11 +120,36 @@ class AgentRuntimeTests(unittest.TestCase):
             respond('buying', '查订单', [], self.spec, lambda *args: self.fail('不得执行'), [],
                     tool_budget=[0], provider=lambda *args: self.output())
 
+    def test_material_rows_validate_before_any_write(self):
+        line = {'type': 'object', 'properties': {'qty': {'type': 'number', 'exclusiveMinimum': 0, 'maximum': 1000000000}},
+                'required': ['qty'], 'additionalProperties': False}
+        self.spec = [schema('create_material_request', '创建需求单', {
+            'items': {'type': 'array', 'minItems': 1, 'maxItems': 20, 'items': line}}, ['items'])]
+        for items in [[], [{'qty': True}], [{'qty': float('nan')}], [{'qty': float('inf')}],
+                      [{'qty': 0}], [{'qty': -1}], [{'qty': '2'}], [{'qty': 1, 'ignore_permissions': True}],
+                      [{'qty': 1}, {}], [{'qty': 1}] * 21]:
+            with self.subTest(items=items), self.assertRaises(RuntimeError):
+                self.run_agent([self.output('create_material_request', {'items': items})])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.run_agent([self.output('create_material_request', {'items': [{'qty': 2.5}]}),
+                         {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '已建单'}]}]), '已建单')
+        self.assertEqual(len(self.calls), 1)
+
 
 if __name__ == '__main__':
     unittest.main()
 
 class PreloadedAndBatchTests(unittest.TestCase):
+    def test_synthetic_prompt_only_requests_available_tools(self):
+        for module in ('control', 'buying', 'stock'):
+            def provider(system, messages, specs):
+                self.assertNotIn('report_action', system)
+                self.assertNotIn('create_material_request', system)
+                self.assertNotIn('ask_module', system)
+                return {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': '合成证据已核对'}]}
+            respond(module, '核对合成场景', [], [schema('read_evidence', '查询证据', {})],
+                    lambda *args: None, [], provider=provider, initial_evidence={'synthetic': True})
+
     def test_preloaded_facts_allow_one_model_request_without_fake_tool_use(self):
         trace, seen = [], []
         def provider(system, messages, specs):
