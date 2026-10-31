@@ -32,6 +32,22 @@ def demand_from(texts):
 
 def update_quotes(existing, text):
     """Apply a supplier-scoped amendment without ever re-parsing the application."""
+    names = [q.get('supplier') for q in existing]
+    if not all(names) or len(set(names)) != len(names):
+        raise ValueError('无法唯一匹配供应商，请按供应商全名提供完整新版报价。')
+    # 长名称优先，已匹配的字符不再用于匹配短名称，避免华通电子误改华通。
+    remaining = text
+    targets = set()
+    for name in sorted(names, key=len, reverse=True):
+        pattern = re.escape(name)
+        if re.search(pattern, remaining):
+            targets.add(name)
+            remaining = re.sub(pattern, lambda match: ' ' * len(match[0]), remaining)
+    common = bool(re.search(r'均|两家|全部', remaining))
+    if common:
+        targets = set(names)
+    if not targets:
+        raise ValueError('请按供应商全名明确本次需修改的报价。')
     if quotes.model_enabled():
         source = ('已有报价（保留未修改字段）：'+json.dumps(existing,ensure_ascii=False)+
                   '\n本次补充：'+text+
@@ -41,16 +57,14 @@ def update_quotes(existing, text):
     else:
         patches = [{k:v for k,v in q.items() if v is not None and not (k=='tax' and v=='未知')}
                    for q in quotes.local_quotes(text) if q.get('supplier')]
-        common = bool(re.search(r'均|两家|全部', text))
         payment = re.search(r'付款条件(?:均)?(?:为|是|[：:])\s*([^。；;\n]+)', text)
         for old in ([] if patches else existing):
-            if not common and old.get('supplier','') not in text:
+            if old.get('supplier') not in targets:
                 continue
             patch = {'supplier':old['supplier']}
             if payment:patch['payment']=payment[1].strip()
             patches.append(patch)
-    names = [q.get('supplier') for q in existing]
-    if len(set(names)) != len(names) or any(q.get('supplier') not in names for q in patches):
+    if any(q.get('supplier') not in targets for q in patches):
         raise ValueError('无法唯一匹配供应商，请按供应商全名提供完整新版报价。')
     result = [dict(q) for q in existing]
     changed = False
@@ -70,7 +84,7 @@ def update_quotes(existing, text):
     return [quotes.validate_quote(q) for q in result]
 
 
-def run(operation, texts, fields=None, image_quotes=None):
+def run(operation, texts, fields=None, image_quotes=None, preview=False):
     if operation not in ('procurement_intake','procurement_compare','procurement_search'):
         raise ValueError('未授权采购工具')
     if fields is None:
@@ -109,6 +123,9 @@ def run(operation, texts, fields=None, image_quotes=None):
         if not q.get('payment'):issues.append('付款条件待核实')
         if q.get('delivery') and q['delivery']<str(intake.today()):issues.append('承诺交期已过')
         rows.append({'source':f'本会话用户报价#{index+1}', 'quote':q, 'total':quotes.total(q),'issues':issues})
+    if preview:
+        return dict(result, operation='procurement_preview', quotes=rows, source_text=source,
+                    preview_only=True, comparison_note='仅提取和核对报价，尚未执行排名；请确认后开始比价。')
     eligible=[r for r in rows if not r['issues'] and r['total'] is not None]
     minimum=min((r['total'] for r in eligible),default=None)
     result.update(quotes=rows,source_text=source,comparable_count=len(eligible),

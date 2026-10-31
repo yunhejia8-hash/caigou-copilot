@@ -262,7 +262,7 @@ def dashboard(module='control', view='chat'):
 @frappe.whitelist()
 def chat_status():
     require_user()
-    return {'model_ready': runtime.configured()}
+    return {'model_ready': runtime.configured(), 'client_version': 'procurement-approval-v1'}
 
 
 def install():

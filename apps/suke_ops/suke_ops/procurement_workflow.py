@@ -76,6 +76,15 @@ def duplicate_candidates(application_id):
     return list(latest.values())
 
 
+def inquiry_fields(wf):
+    """保留申请原始数量，询比价使用本版预审的净采购数量。"""
+    fields = dict(wf['fields'])
+    quantity = wf.get('preflight', {}).get('purchase_quantity')
+    if quantity is not None:
+        fields['quantity'] = quantity
+    return fields
+
+
 def application_html(wf):
     f, check = wf['fields'], wf['preflight']
     def show(value, suffix=''):
@@ -88,6 +97,7 @@ def application_html(wf):
             ('本次预算上限',show(f.get('budget'),' 元')),('暂估采购单价',show(check.get('unit_price'),' 元/'+unit)),
             ('当前可用 / 按时在途',show(f.get('available_stock'),unit)+' / '+show(f.get('on_time_incoming'),unit)),
             ('建议新增采购 / 暂估金额',show(check.get('purchase_quantity'),unit)+' / '+show(check.get('estimated_total'),' 元')),
+            ('本版询比价数量',show(inquiry_fields(wf).get('quantity'),unit)),
             ('价格依据', (check.get('price_source') or {}).get('description') or '尚未询价，不以预算倒推单价'),
             ('预审结论',LABELS[check['state']]),('生成时间',wf['generated_at'])]
     cells = ''.join('<tr><th>'+escape(k)+'</th><td>'+escape(v)+'</td></tr>' for k,v in rows)
@@ -98,7 +108,7 @@ def application_html(wf):
     h1{font-size:25px;margin:0 0 6px} .meta{color:#627c72;margin-bottom:16px}table{width:100%;border-collapse:collapse;table-layout:fixed}
     tr{page-break-inside:avoid}th,td{border:1px solid #dbe5df;padding:7px 10px;text-align:left;word-wrap:break-word}th{width:29%;font-weight:500;background:#f0f5f1}
     h2{font-size:13px;margin:15px 0 5px}ul{padding-left:18px;font-size:10px;color:#586f64}li{margin:3px 0}.footer{margin-top:14px;border-top:1px solid #dbe5df;padding-top:10px;font-size:10px;color:#63786d}
-    </style></head><body><h1>采购需求申请表</h1><div class="meta">需求预审记录 · 待审批申请</div><table>'''+cells+'''</table><h2>预审依据与待核实事项</h2><ul>'''+notes+'''</ul><div class="footer">库存与在途如有填写，来源为申请人声明；未核实时不抵扣。此表不锁定库存或预算，不自动下单。<br>申请确认：____________　部门审批：____________　采购复核：____________</div></body></html>'''
+    </style></head><body><h1>采购需求申请表</h1><div class="meta">需求预审记录 · 待审批申请</div><table>'''+cells+'''</table><h2>预审依据与待核实事项</h2><ul>'''+notes+'''</ul><div class="footer">库存与在途按申请人声明试算，尚未核实ERP库存，正式建单前须复核；未提供时不抵扣，询比价暂按申请数量。此表不锁定库存或预算，不自动下单。<br>申请确认：____________　部门审批：____________　采购复核：____________</div></body></html>'''
 
 
 def create_pdf(wf, turn_name):
@@ -128,7 +138,13 @@ def pack(wf, answer, evidence=None):
 def process(turn, prior=None):
     text = turn.question.strip()
     prior = prior if prior is not None else previous_workflow(turn.conversation, turn.creation)
-    is_procurement = bool(re.search(r'需要|我要采购|采购需求|供应商[：:]|生成申请|申请表|询价|比价|查价|购买|买[0-9一二三四五六七八九十]',text))
+    # 已有订单的查询仍交给原工具；“需要催交”不是新采购申请。
+    new_request = bool(re.search(r'我要采购|采购需求|(?:生成|创建|登记|提交|修改).{0,5}(?:申请|需求)|(?:需要|采购|购买|买)\s*\d+(?:\.\d+)?\s*(?:个|件|盒|包|台|套|米|公斤|千克)', text))
+    denied_request = bool(re.search(r'(?:不要|无需|暂不|不|别)(?:再|自动)?(?:生成|创建|登记|提交|修改).{0,5}(?:申请|需求)', text))
+    application_command = bool(re.search(r'^确认申请\s|^(?:开始比价|判断审批)$|供应商[：:]', text))
+    if re.search(r'订单|工单|销售|待收货|催交', text) and not (new_request and not denied_request) and not application_command:
+        return None
+    is_procurement = (new_request and not denied_request) or bool(re.search(r'供应商[：:]|生成申请|申请表|询价|比价|查价',text))
     is_procurement = is_procurement or bool(re.search('采购',text) and re.search('数量|规格|预算|预审',text))
     if not prior and not is_procurement:
         return None
@@ -158,7 +174,7 @@ def process(turn, prior=None):
         wf.update(phase='quotations_ready', quote_turn=turn.name)
         wf.pop('approval_reminder', None)
         wf.pop('approval', None)
-        preview = procurement_bridge.run('procurement_compare', [], fields=wf['fields'], image_quotes=wf['image_quotes'])
+        preview = procurement_bridge.run('procurement_compare', [], fields=inquiry_fields(wf), image_quotes=wf['image_quotes'], preview=True)
         return pack(wf, '图片报价已提取，请核对表格；识别错误请粘贴完整新版报价替换。确认后点击“开始比价”。', [{'tool':'quote_image_extraction','result':preview}])
     confirmation = re.fullmatch(r'确认申请\s+([A-Za-z0-9-]+)\s+第(\d+)版',text)
     if confirmation:
@@ -176,17 +192,17 @@ def process(turn, prior=None):
     if prior and quote_message and wf['phase'] in ('inquiry','quotations_ready','compared'):
         try:
             if re.search(r'供应商[：:]',text) and not (re.search('补充|更新|修改|调整',text) and (wf.get('saved_quotes') or wf.get('image_quotes') or wf.get('quote_source'))):
-                preview = procurement_bridge.run('procurement_compare',[text],fields=wf['fields'])
+                preview = procurement_bridge.run('procurement_compare',[text],fields=inquiry_fields(wf),preview=True)
                 rows = [row['quote'] for row in preview.get('quotes',[])]
             else:
                 rows = wf.get('saved_quotes') or wf.get('image_quotes')
                 if not rows and wf.get('quote_source'):
-                    previous = procurement_bridge.run('procurement_compare',[wf['quote_source']],fields=wf['fields'])
+                    previous = procurement_bridge.run('procurement_compare',[wf['quote_source']],fields=inquiry_fields(wf),preview=True)
                     rows = [row['quote'] for row in previous.get('quotes',[])]
                 if not rows:
                     return pack(wf,'请先按供应商全名录入报价，各供应商用空行分隔。')
                 rows = procurement_bridge.update_quotes(rows,text)
-                preview = procurement_bridge.run('procurement_compare',[],fields=wf['fields'],image_quotes=rows)
+                preview = procurement_bridge.run('procurement_compare',[],fields=inquiry_fields(wf),image_quotes=rows,preview=True)
         except ValueError as error:
             return pack(wf,str(error)+' 原申请和报价已保留。')
         if not rows:
@@ -228,13 +244,13 @@ def process(turn, prior=None):
         reasons = check.get('clarifications',[])+check.get('blockers',[])+check.get('missing',[])
         return pack(wf,'请补充或调整：'+'；'.join(dict.fromkeys(reasons))+'。')
     if wf['phase'] == 'no_purchase':
-        return pack(wf,'预审结果：现有库存与按时在途已满足需求，无需新增采购。')
+        return pack(wf,'按申请人声明试算，库存与按时在途可满足需求，暂不新增采购；尚未核实ERP库存，正式建单前须复核。')
     if wf['phase'] == 'awaiting_confirmation':
         return pack(wf,'申请表已生成，请先预览并确认，再输入询价结果。')
     if text in ('开始比价','判断审批'):
         if wf['phase'] not in ('quotations_ready','compared') or not (wf.get('quote_source') or wf.get('saved_quotes') or wf.get('image_quotes')):
             return pack(wf,'请先录入本笔申请的供应商报价，再开始比价。')
-        result = procurement_bridge.run('procurement_compare',[] if wf.get('saved_quotes') else [wf.get('quote_source','')],fields=wf['fields'], **({'image_quotes':wf.get('saved_quotes') or wf['image_quotes']} if wf.get('saved_quotes') or wf.get('image_quotes') else {}))
+        result = procurement_bridge.run('procurement_compare',[] if wf.get('saved_quotes') else [wf.get('quote_source','')],fields=inquiry_fields(wf), **({'image_quotes':wf.get('saved_quotes') or wf['image_quotes']} if wf.get('saved_quotes') or wf.get('image_quotes') else {}))
         wf['phase'] = 'compared' if result.get('comparable_count',0)>=2 else 'quotations_ready'
         answer = f"已整理 {len(result.get('quotes',[]))} 份报价。"
         wf.pop('approval_reminder', None)
@@ -248,7 +264,7 @@ def process(turn, prior=None):
             answer += '报价条件尚未齐全，请补充标注项后再比价。'
         return pack(wf,answer,[{'tool':'procurement_compare','result':result}])
     if re.search('网上|联网|查价',text):
-        result = procurement_bridge.run('procurement_search',[text],fields=wf['fields'])
+        result = procurement_bridge.run('procurement_search',[text],fields=inquiry_fields(wf))
         return pack(wf,'已查询网上参考价，请核对规格和来源。' if result.get('sources') else '本次未取得可核验参考价，请稍后重试。',
                     [{'tool':'procurement_search','result':result}])
     if wf.get('approval'):
@@ -262,12 +278,12 @@ def evaluate_approval(total, budget=None):
     if not amount.is_finite() or amount < 0:
         raise ValueError('无效采购金额')
     required = amount > Decimal('100000')
-    label = '待人工审核' if required else '审批自动通过'
-    message = '审批结果：'+label+'。'+('最终方案金额超过100,000元，需人工审核后才能继续。' if required else '最终方案金额不超过100,000元，按金额规则自动通过。')
+    label = '申请快照 · 待人工审核' if required else '申请快照 · 审批自动通过'
+    message = '申请快照审批结果：'+label+'。'+('最终方案金额超过100,000元，需人工审核后才能继续。' if required else '最终方案金额不超过100,000元，按金额规则自动通过。')+'此判定仅用于本版申请快照，不代表ERP单据审批、提交或下单。'
     over_budget = budget is not None and amount > Decimal(str(budget))
     if over_budget:
         message += '同时超过申请预算，请调整方案或申请追加预算。'
-    return {'threshold':100000,'amount':float(amount),'requires_escalation':required,'over_budget':over_budget,
+    return {'scope':'application_snapshot','threshold':100000,'amount':float(amount),'requires_escalation':required,'over_budget':over_budget,
             'status':'pending_review' if required else 'approved','label':label,'basis':'最低可比报价含税到仓总额','message':message}
 
 

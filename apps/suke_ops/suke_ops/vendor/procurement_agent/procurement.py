@@ -96,9 +96,10 @@ def local_quotes(text):
         m=re.search(r'(?:数量|采购数量)[：:]?\s*(\d+(?:\.\d+)?)\s*(个|件|盒|包|台|套|米|公斤|千克)',clean)
         if m:q['quantity']=float(m[1]);q['unit']=q['unit'] or m[2]
         q['tax']='未知'
-        if re.search(r'未税|不含税',clean):q['tax']='未税'
-        elif '含税' in clean:q['tax']='含税'
-        rate=re.search(r'税率[：:]?\s*(\d+(?:\.\d+)?)\s*%',clean)
+        goods = re.sub(r'(?:未税|不含税)?运费[^，,。；;\n]*(?:[，, ]*(?:未税|不含税)(?=[，,。；;\n]|$))?', '', clean)
+        if re.search(r'未税|不含税',goods):q['tax']='未税'
+        elif '含税' in goods:q['tax']='含税'
+        rate=re.search(r'税率[：:]?\s*(\d+(?:\.\d+)?)\s*%',goods)
         if rate:q['tax_rate']=float(rate[1])
         freight=re.search(r'运费[：:]?\s*(\d+(?:\.\d+)?)\s*元',clean)
         if freight:q['freight']=float(freight[1])
@@ -163,7 +164,18 @@ def validate_quote(q):
             except ValueError:out[k]=None
     return out
 
+def untaxed_freight(q):
+    # 不使用货物税率猜测运费税率，明确未税的运费需供应商补充含税金额。
+    for source in reversed((q.get('evidence') or '').split('\n补充：')):
+        if re.search(r'(?:未税|不含税)\s*运费|运费[^，,。；;\n]{0,40}(?:未税|不含税)|运费[：:]?\s*\d+(?:\.\d+)?\s*元[，, ]*(?:未税|不含税)(?=[，,。；;\n]|$)', source):
+            return True
+        if re.search(r'含税运费|运费[^，,。；;\n]{0,40}含税|包邮', source):
+            return False
+    return False
+
+
 def total(q):
+    if untaxed_freight(q):return None
     if any(q.get(k) is None for k in ('unit_price','quantity','freight')):return None
     if q.get('tax') == '含税':factor=Decimal('1')
     elif q.get('tax') == '未税' and q.get('tax_rate') is not None:
@@ -241,7 +253,7 @@ def normalized_spec(value):
     return re.sub(r'(?<=\d)[xX×*](?=\d)', '×', re.sub(r'\s+', '', value or ''))
 
 def issues(q,f):
-    notes=[]
+    notes = ['运费须补充含税金额'] if untaxed_freight(q) else []
     for k,label in [('supplier','供应商'),('unit_price','单价'),('quantity','报价数量'),('unit','计价单位'),('freight','运费'),('delivery','到货日期'),('material','物料'),('spec','规格')]:
         if q.get(k) is None:notes.append('缺少'+label)
     if q.get('tax')!='含税' and not (q.get('tax')=='未税' and q.get('tax_rate') is not None):notes.append('需确认含税价格或明确税率')

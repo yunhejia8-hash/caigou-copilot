@@ -9,6 +9,41 @@ QUOTE='供应商：A厂，物料：五层瓦楞包装箱，规格：400×300×25
 FIELDS={'material_name':'五层瓦楞包装箱','spec':'400×300×250mm','quantity':500,'unit':'个','needed_by':'2026-11-15'}
 
 class BridgeTests(unittest.TestCase):
+    def test_preview_does_not_publish_ranking(self):
+        result=bridge.run('procurement_compare',[QUOTE+'\n\n'+QUOTE.replace('A厂','B厂')],fields=FIELDS,preview=True)
+        self.assertEqual(len(result['quotes']),2)
+        for key in ('lowest_total','lowest_sources','comparable_count'):
+            self.assertNotIn(key,result)
+
+    def test_untaxed_freight_requires_inclusive_amount_before_ranking(self):
+        quote=QUOTE.replace('运费100元','运费100元未税，运费税率13%')
+        result=bridge.run('procurement_compare',[quote+'\n\n'+QUOTE.replace('A厂','B厂')],fields=FIELDS)
+        self.assertIsNone(result['quotes'][0]['total'])
+        self.assertIn('运费须补充含税金额',result['quotes'][0]['issues'])
+        self.assertIsNone(result['lowest_total'])
+        self.assertEqual(result['quotes'][0]['quote']['tax'],'含税')
+
+    def test_freight_correction_and_goods_tax_are_independent(self):
+        row=bridge.quotes.local_quotes(QUOTE.replace('含税，运费100元','运费100元含税，未税单价，税率13%'))[0]
+        self.assertEqual(row['tax'],'未税')
+        self.assertEqual(bridge.quotes.total(row),2077.5)
+        rows=bridge.quotes.local_quotes(QUOTE.replace('运费100元','运费100元未税'))
+        updated=bridge.update_quotes(rows,'供应商：A厂，运费113元含税')
+        self.assertEqual(updated[0]['freight'],113)
+        self.assertEqual(bridge.quotes.total(updated[0]),1863)
+        self.assertIn('运费100元未税',updated[0]['evidence'])
+
+    def test_supplier_substring_amendment_changes_only_explicit_full_name(self):
+        rows=bridge.quotes.local_quotes(QUOTE.replace('A厂','华通')+'\n\n'+QUOTE.replace('A厂','华通电子'))
+        updated=bridge.update_quotes(rows,'华通电子付款条件为验收后60天')
+        self.assertEqual(updated[0]['payment'],'验收后30天')
+        self.assertEqual(updated[1]['payment'],'验收后60天')
+        with patch.object(bridge.quotes,'model_enabled',return_value=True),patch.object(bridge.quotes,'model_quotes',return_value=[dict(rows[0],payment='错误修改')]):
+            with self.assertRaises(ValueError):bridge.update_quotes(rows,'华通电子付款条件为验收后60天')
+        named=bridge.quotes.local_quotes(QUOTE.replace('A厂','均胜电子')+'\n\n'+QUOTE.replace('A厂','B厂'))
+        updated=bridge.update_quotes(named,'均胜电子付款条件为验收后60天')
+        self.assertEqual(updated[1]['payment'],'验收后30天')
+
     def setUp(self):
         self.env=patch.dict(os.environ,{'OPENAI_API_KEY':'','OPENAI_MODEL':''});self.env.start()
         self.extract=patch.object(bridge.intake,'extract',return_value=(FIELDS,[],'test'));self.extract.start()

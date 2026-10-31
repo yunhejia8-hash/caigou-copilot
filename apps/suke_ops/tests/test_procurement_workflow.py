@@ -18,6 +18,32 @@ TEXT = '申请人李明，生产部，需要500个五层瓦楞包装箱，规格
 QUOTE='供应商：A厂，物料：五层瓦楞包装箱，规格：400×300×250mm\n数量：500个，单价：3.5元/个，含税，运费100元\n到货：2026-11-15，有效期：2026-11-14，付款：验收后30天'
 
 class WorkflowTests(unittest.TestCase):
+    def test_confirmed_net_purchase_quantity_drives_inquiry_and_comparison(self):
+        fields = {**FIELDS, 'available_stock': 200, 'on_time_incoming': 0}
+        with patch.object(workflow.intake, 'local_extract', return_value=(fields, [])):
+            wf = self.ready()
+        self.assertEqual(wf['preflight']['purchase_quantity'], 300)
+        self.assertIn('试算', workflow.application_html(wf))
+        self.assertIn('本版询比价数量', workflow.application_html(wf))
+        confirmed = self.confirm(wf)
+        quotes = QUOTE.replace('500个', '300个')
+        with patch.object(workflow.procurement_bridge.quotes, 'model_enabled', return_value=False):
+            saved = self.process(quotes + '\n\n' + quotes.replace('A厂', 'B厂').replace('3.5', '3.7'), confirmed)
+            result = self.process('开始比价', saved['workflow'])
+        evidence = result['procurement'][0]['result']
+        self.assertEqual(evidence['fields']['quantity'], 300)
+        self.assertEqual(evidence['comparable_count'], 2)
+        self.assertEqual(evidence['lowest_total'], 1150)
+        self.assertEqual(result['workflow']['fields']['quantity'], 500)
+
+    def test_existing_order_questions_never_start_or_resume_application(self):
+        questions = ['哪些采购订单需要催交？', '采购订单预算是否超支？',
+                     '生产工单需要多少物料？', '不要创建申请，只查询订单交期']
+        for prior in (None, self.ready()):
+            for question in questions:
+                with self.subTest(prior=bool(prior), question=question), patch.object(workflow.intake, 'extract', side_effect=AssertionError('订单查询不应提取新需求')):
+                    self.assertIsNone(self.process(question, prior))
+
     def setUp(self):
         self.patches=[patch.dict(sys.modules, {'frappe':fake}),patch.object(workflow,'duplicate_candidates',return_value=[]),
                       patch.object(workflow,'create_pdf',side_effect=lambda wf,name:{'file':'PDF-'+name,'turn':name}),
