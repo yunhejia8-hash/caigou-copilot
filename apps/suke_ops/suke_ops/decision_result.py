@@ -202,7 +202,7 @@ def build(turn, result):
         if practice:
             card.update(kind='sandbox', sandbox={'dataset_id': practice['dataset_id'], 'registered': True,
                         'label': practice['label'], 'scope': 'isolated_erp'},
-                        title='选择本地隔离演练方案',
+                        title='选择本次供料方案',
                         summary='虚拟业务数据已写入本地 ERP；选择后仍须审批，执行仅影响本次注册的隔离库存与单据。')
         elif _is_demo(case):
             card.update(kind='synthetic', summary='这是合成业务案例；仅展示候选分配，不允许从聊天执行真实单据。')

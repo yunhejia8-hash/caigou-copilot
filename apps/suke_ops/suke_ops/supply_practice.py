@@ -4,6 +4,7 @@ No public seed endpoint, external communication or model call. The caller owns
 the transaction; install creates metadata and may perform framework DDL.
 """
 from copy import deepcopy
+from contextlib import contextmanager
 from datetime import timedelta
 import hashlib
 import json
@@ -16,6 +17,7 @@ from frappe.utils import getdate, nowdate, now_datetime
 SITE = 'focus.local'
 DOCTYPE = 'Supply Practice Dataset'
 VERSION = 1
+_seed_outbound_silenced = False
 
 
 def _tag(value):
@@ -70,17 +72,71 @@ def _read(doctype, name):
 
 
 def _outbound_guard():
-    """Do not trigger enabled site notifications/webhooks from practice writes."""
-    affected = ['Company', 'Warehouse', 'Item', 'Customer', 'Supplier', 'Stock Entry',
-                'Sales Order', 'BOM', 'Work Order', 'Stock Reservation Entry', 'Material Request',
-                'Purchase Order', 'Operations Approval', 'Supply Case', DOCTYPE]
-    for doctype, link in [('Notification', 'document_type'), ('Webhook', 'webhook_doctype')]:
-        if frappe.db.exists('DocType', doctype):
-            meta = frappe.get_meta(doctype)
-            if not meta.has_field('enabled') or not meta.has_field(link):
-                frappe.throw('无法验证站点外发规则，暂不能初始化虚拟实操')
-            if frappe.db.exists(doctype, {'enabled': 1, link: ['in', affected]}):
-                frappe.throw('站点存在适用于本次单据的通知或Webhook，请先由管理员确认外发边界；未创建虚拟数据')
+    """Cover derived native documents too; never disable persistent site rules."""
+    if frappe.db.exists('DocType', 'Notification'):
+        meta = frappe.get_meta('Notification')
+        if not all(meta.has_field(field) for field in ('enabled', 'channel', 'event')):
+            frappe.throw('无法验证站点外发规则，暂不能初始化虚拟实操')
+        rules = frappe.get_all('Notification', filters={'enabled': 1}, fields=['channel', 'event'])
+        for rule in rules:
+            _check_notification(rule)
+        if rules and not (_seed_outbound_silenced and frappe.flags.mute_emails is True):
+            frappe.throw('尚未阻断本次初始化的通知与邮件队列，不能创建虚拟数据')
+    if frappe.db.exists('DocType', 'Webhook'):
+        if not frappe.get_meta('Webhook').has_field('enabled'):
+            frappe.throw('无法验证站点Webhook，暂不能初始化虚拟实操')
+        if frappe.db.exists('Webhook', {'enabled': 1}):
+            frappe.throw('站点存在已启用Webhook，不能初始化虚拟实操；未禁用原有规则')
+
+
+def _check_notification(rule):
+    # Scheduled rules run after this CLI exits, outside the temporary barriers.
+    if (rule.channel not in ('Email', 'System Notification')
+            or rule.event not in ('New', 'Save', 'Submit', 'Cancel', 'Value Change', 'Method')):
+        frappe.throw('存在延迟通知或未允许的通知渠道，不能初始化虚拟实操；未禁用原有规则')
+
+
+@contextmanager
+def _silence_seed_outbound():
+    """Block notification/queue creation only in this isolated CLI process.
+
+    mute_emails alone only blocks queue flushing, so it cannot prevent workers
+    sending a queue after this process exits. Suppress both earlier entrypoints.
+    No install/import flags, permissions or persistent settings are changed.
+    """
+    _admin()
+    if getattr(frappe.local, 'request', None) is not None:
+        frappe.throw('虚拟数据初始化只能在本地CLI进程运行', frappe.PermissionError)
+    from frappe.email.doctype.notification.notification import Notification
+    from frappe.email.doctype.email_queue.email_queue import QueueBuilder
+
+    global _seed_outbound_silenced
+    previous_send, previous_process = Notification.send, QueueBuilder.process
+    previous_silenced = _seed_outbound_silenced
+    missing = object()
+    previous_mute = frappe.flags.get('mute_emails', missing)
+
+    def suppress_notification(notification, doc):
+        _check_notification(notification)
+        # Return before Communication, Notification Log or background jobs exist.
+        return None
+
+    def suppress_queue(builder, *args, **kwargs):
+        return None
+
+    try:
+        Notification.send = suppress_notification
+        QueueBuilder.process = suppress_queue
+        frappe.flags.mute_emails = True
+        _seed_outbound_silenced = True
+        yield
+    finally:
+        Notification.send, QueueBuilder.process = previous_send, previous_process
+        _seed_outbound_silenced = previous_silenced
+        if previous_mute is missing:
+            frappe.flags.pop('mute_emails', None)
+        else:
+            frappe.flags.mute_emails = previous_mute
 
 
 def context(case):
@@ -307,6 +363,11 @@ def summary(case):
 
 def seed(tag='USER'):
     """CLI-only native ERP seed, no commit; repeat returns the registered batch."""
+    with _silence_seed_outbound():
+        return _seed(tag)
+
+
+def _seed(tag):
     _admin()
     tag = _tag(tag)
     if not frappe.db.exists('DocType', DOCTYPE):

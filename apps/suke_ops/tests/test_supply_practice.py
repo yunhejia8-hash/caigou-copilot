@@ -27,10 +27,16 @@ class Doc(NS):
             raise Denied('denied')
 
 
+class Flags(dict):
+    __getattr__ = dict.get
+    __setattr__ = dict.__setitem__
+
+
 class PracticeTests(unittest.TestCase):
     def setUp(self):
         f = self.f = ModuleType('frappe')
         f.local, f.session = NS(site='focus.local'), NS(user='Administrator')
+        f.flags = Flags(mute_emails=False)
         f.PermissionError = Denied
         f.throw = lambda message, exception=Invalid: (_ for _ in ()).throw(exception(message))
         f.has_permission = lambda *a, **k: True
@@ -84,6 +90,23 @@ class PracticeTests(unittest.TestCase):
                               'document': 'SO-C', 'demand_id': 'C-LINE', 'qty': 420}]}
         self.metadata = {'Supply Practice Dataset', 'Supply Case', 'Supply Decision', 'Operations Approval'}
         self.calls = []
+        calls = self.calls
+
+        class Notification(Doc):
+            def send(self, doc):
+                calls.append('notification-created')
+
+        class QueueBuilder:
+            def process(self, **kwargs):
+                calls.append('queue-created')
+
+        self.Notification, self.QueueBuilder = Notification, QueueBuilder
+        framework = patch.dict(sys.modules, {
+            'frappe.email.doctype.notification.notification': NS(Notification=Notification),
+            'frappe.email.doctype.email_queue.email_queue': NS(QueueBuilder=QueueBuilder),
+        })
+        framework.start()
+        self.addCleanup(framework.stop)
         f.db = NS(exists=self.exists, get_value=self.value, get_single_value=lambda *a: 1,
                   savepoint=lambda *a: self.calls.append('savepoint'),
                   rollback=lambda **k: self.calls.append('rollback'),
@@ -285,12 +308,74 @@ class PracticeTests(unittest.TestCase):
         self.assertTrue(self.module.install()['skipped'])
         self.assertEqual(self.calls, [])
 
-    def test_outbound_notification_prevents_seed_without_disabling_rule(self):
+    def notification_rules(self, rules):
         original = self.f.db.exists
-        self.f.db.exists = lambda kind, filters: True if (kind == 'DocType' and filters == 'Notification') or kind == 'Notification' else original(kind, filters)
+        self.f.db.exists = lambda kind, filters: True if kind == 'DocType' and filters == 'Notification' else original(kind, filters)
         self.f.get_meta = lambda kind: NS(has_field=lambda name: True)
-        with self.assertRaisesRegex(Invalid, '通知或Webhook'):
+        self.f.get_all = lambda *args, **kwargs: [Doc(**rule) for rule in rules]
+
+    def test_notification_channels_and_scheduled_events_block_seed_without_changing_rule(self):
+        for rule in [{'channel': channel, 'event': 'New'} for channel in ('Slack', 'SMS', 'Unknown')] + [
+                {'channel': 'Email', 'event': event} for event in ('Days Before', 'Days After', 'Unknown')]:
+            with self.subTest(rule=rule):
+                self.notification_rules([rule])
+                with self.assertRaisesRegex(Invalid, '延迟通知或未允许'):
+                    self.module.seed('NEW')
+                self.assertFalse(self.f.flags.mute_emails)
+        self.assertEqual(self.calls, [])
+
+    def test_email_and_system_notifications_require_active_seed_barrier(self):
+        self.notification_rules([{'channel': 'Email', 'event': 'Value Change'},
+                                 {'channel': 'System Notification', 'event': 'New'}])
+        self.f.flags.mute_emails = True  # mute alone cannot allow queued email.
+        with self.assertRaisesRegex(Invalid, '尚未阻断'):
+            self.module._outbound_guard()
+        with self.module._silence_seed_outbound():
+            self.module._outbound_guard()
+        self.assertTrue(self.f.flags.mute_emails)
+
+    def test_seed_blocks_queue_and_notification_creation_and_restores_on_exception(self):
+        send, process = self.Notification.send, self.QueueBuilder.process
+        for original in (False, True, None):
+            with self.subTest(original=original):
+                self.f.flags.mute_emails = original
+                with self.assertRaisesRegex(Invalid, 'native seed failure'):
+                    with self.module._silence_seed_outbound():
+                        self.assertTrue(self.f.flags.mute_emails)
+                        for channel in ('Email', 'System Notification'):
+                            self.Notification(channel=channel, event='New').send(Doc())
+                        self.QueueBuilder().process(send_now=True)
+                        raise Invalid('native seed failure')
+                self.assertIs(self.f.flags.mute_emails, original)
+                self.assertIs(self.Notification.send, send)
+                self.assertIs(self.QueueBuilder.process, process)
+                self.assertFalse(self.module._seed_outbound_silenced)
+        self.f.flags.pop('mute_emails')
+        with self.module._silence_seed_outbound():
+            self.QueueBuilder().process(send_now=False)
+        self.assertNotIn('mute_emails', self.f.flags)
+        self.assertEqual(self.calls, [])
+
+    def test_seed_notification_barrier_rejects_newly_added_external_channel(self):
+        with self.module._silence_seed_outbound():
+            with self.assertRaisesRegex(Invalid, '未允许'):
+                self.Notification(channel='Slack', event='New').send(Doc())
+        self.assertEqual(self.calls, [])
+
+    def test_webhooks_block_seed_even_for_derived_native_documents(self):
+        original = self.f.db.exists
+        self.f.db.exists = lambda kind, filters: True if (kind == 'DocType' and filters == 'Webhook') or kind == 'Webhook' else original(kind, filters)
+        self.f.get_meta = lambda kind: NS(has_field=lambda name: True)
+        with self.assertRaisesRegex(Invalid, 'Webhook'):
             self.module.seed('NEW')
+        self.assertFalse(self.f.flags.mute_emails)
+        self.assertEqual(self.calls, [])
+
+    def test_http_cannot_enter_process_wide_seed_barrier(self):
+        self.f.local.request = object()
+        with self.assertRaises(Denied):
+            self.module.seed('NEW')
+        self.assertFalse(self.f.flags.mute_emails)
         self.assertEqual(self.calls, [])
 
 
