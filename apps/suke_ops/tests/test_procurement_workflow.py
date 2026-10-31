@@ -18,6 +18,10 @@ TEXT = '申请人李明，生产部，需要500个五层瓦楞包装箱，规格
 QUOTE='供应商：A厂，物料：五层瓦楞包装箱，规格：400×300×250mm\n数量：500个，单价：3.5元/个，含税，运费100元\n到货：2026-11-15，有效期：2026-11-14，付款：验收后30天'
 
 class WorkflowTests(unittest.TestCase):
+    def test_explicit_erp_demand_registration_keeps_original_tool_path(self):
+        for question in ('采购17 Nos的ITEM-TEST，请登记需求单','请创建物料需求单','继续保存需求单','不要PDF，请创建物料需求单','无需申请表，请登记需求单'):
+            with self.subTest(question=question),patch.object(workflow.intake,'extract',side_effect=AssertionError('原生登记不能进入PDF申请')):
+                self.assertIsNone(self.process(question))
     def test_confirmed_net_purchase_quantity_drives_inquiry_and_comparison(self):
         fields = {**FIELDS, 'available_stock': 200, 'on_time_incoming': 0}
         with patch.object(workflow.intake, 'local_extract', return_value=(fields, [])):

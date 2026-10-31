@@ -137,6 +137,9 @@ def pack(wf, answer, evidence=None):
 
 def process(turn, prior=None):
     text = turn.question.strip()
+    # 原生ERP需求单与私有PDF申请是两个明确入口，不能抢占已授权的原生登记。
+    if re.search(r'物料需求单|(?:登记|创建|保存).{0,6}需求单', text):
+        return None
     prior = prior if prior is not None else previous_workflow(turn.conversation, turn.creation)
     # 已有订单的查询仍交给原工具；“需要催交”不是新采购申请。
     new_request = bool(re.search(r'我要采购|采购需求|(?:生成|创建|登记|提交|修改).{0,5}(?:申请|需求)|(?:需要|采购|购买|买)\s*\d+(?:\.\d+)?\s*(?:个|件|盒|包|台|套|米|公斤|千克)', text))

@@ -1,10 +1,24 @@
 """模型输出属于不可信输入：验证工具白名单、边界和完整回答要求。"""
 import unittest
+import io
+import os
+from unittest.mock import patch
 
 from suke_ops.agent_runtime import respond, schema, text_schema
 
 
 class AgentRuntimeTests(unittest.TestCase):
+    def test_gateway_receives_application_user_agent(self):
+        from suke_ops.agent_runtime import request_model
+        config = {'ANTHROPIC_BASE_URL': 'https://api.openai-next.com',
+                  'ANTHROPIC_MODEL': 'deepseek-v4-flash', 'ANTHROPIC_AUTH_TOKEN': 'test-token'}
+        with patch.dict(os.environ, config), patch('suke_ops.agent_runtime.urlopen',
+                return_value=io.BytesIO(b'{"content":[],"stop_reason":"end_turn"}')) as transport:
+            request_model('连接测试', [{'role': 'user', 'content': 'test'}], [])
+        request = transport.call_args.args[0]
+        self.assertEqual(request.full_url, 'https://api.openai-next.com/v1/messages')
+        self.assertEqual(request.get_header('User-agent'), 'caigou-copilot/1.0')
+
     def setUp(self):
         self.spec = [schema('read', '读单据', {'name': text_schema(['SAFE'])}, ['name'])]
         self.trace = []

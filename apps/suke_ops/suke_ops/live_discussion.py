@@ -11,8 +11,11 @@ from suke_ops import agent_runtime as runtime
 
 
 def evidence(index, updated=False):
-    if type(index) is not int or not 0 <= index < 6 or type(updated) is not bool:
+    if type(index) is not int or not 0 <= index < 7 or type(updated) is not bool:
         raise ValueError('场景参数无效。')
+    if index == 6:
+        from suke_ops.trace_scenario import evidence as trace_evidence
+        return trace_evidence(updated)
     rows = json.loads(Path(__file__).with_name('scenario_facts.json').read_text(encoding='utf-8'))
     row = rows[index]
     if updated and index != 0:
@@ -33,6 +36,8 @@ def evidence(index, updated=False):
 
 
 def source_records(snapshot):
+    if snapshot.get('rich_sources'):
+        return snapshot['rich_sources'] + snapshot.get('human_sources', [])
     records = []
     for label, value in snapshot['facts']:
         records.append({'id': label.split(' · ')[0], 'label': label, 'text': value,
@@ -49,7 +54,43 @@ def short_reply(text, limit=140):
     return plain if len(plain) <= limit else plain[:limit] + '…'
 
 
-def discuss(snapshot, question, publish, provider=None, on_event=None):
+
+def _model_payload(snapshot, selected_sources, discussion, single_source=False):
+    """Keep one copy of source text in model context, without changing audit data.
+
+    Rich cases store the same source three ways for UI/backward compatibility:
+    facts, rich_sources and the tool's sources. Only the model projection is
+    compacted. Unmatched facts and all business constraints remain available.
+    """
+    if single_source:
+        relevant_keys = ('scenario_key', 'synthetic', 'snapshot_version', 'as_of',
+                         'evidence_precedence', 'boundary', 'priority_policy', 'priority_assessment')
+        model_evidence = {key: snapshot[key] for key in relevant_keys if key in snapshot}
+    else:
+        model_evidence = {key: value for key, value in snapshot.items()
+                          if key not in ('facts', 'rich_sources', 'human_sources')}
+        covered = {(row.get('label'), row.get('text')) for row in selected_sources}
+        unmatched = [fact for fact in snapshot.get('facts', []) if tuple(fact) not in covered]
+        if unmatched:
+            model_evidence['facts'] = unmatched
+
+    model_sources = []
+    for source in selected_sources:
+        row = dict(source)
+        # The rich source's original channel/time already contains these values.
+        # Preserve different timestamps (e.g. actual receipt/ingestion time).
+        if 'channel' in row and row.get('source_type') == row['channel']:
+            row.pop('source_type', None)
+        if 'at' in row and row.get('reported_at') == row['at']:
+            row.pop('reported_at', None)
+        model_sources.append(row)
+    # Full replies are retained; summary and duration are derived UI fields.
+    model_discussion = [{key: value for key, value in row.items()
+                         if key not in ('summary', 'duration_ms')} for row in discussion]
+    return {'evidence': model_evidence, 'sources': model_sources, 'discussion': model_discussion}
+
+
+def discuss(snapshot, question, publish, provider=None, on_event=None, priority_policy=None):
     """Parallel department rounds, with coordinator barriers; at most 30 model calls.
 
     Workers only read the immutable evidence/previous-phase snapshot and call the
@@ -59,6 +100,14 @@ def discuss(snapshot, question, publish, provider=None, on_event=None):
     deadline = started_at + 780
     transcript, trace, events = [], [], []
     sources = source_records(snapshot)
+    priority_state = {}
+    model_snapshot = snapshot
+    if snapshot.get('scenario_key') == 'connector-1286':
+        from suke_ops.priority_policy import make_policy, assess, model_evidence, final_decision
+        policy = priority_policy or make_policy(snapshot)
+        assessment = assess(snapshot, policy)
+        priority_state = {'priority_policy': policy, 'priority_assessment': assessment}
+        model_snapshot = model_evidence(snapshot, policy, assessment)
 
     def emit(module, phase, kind, summary, at=None, **extra):
         events.append({'id': len(events) + 1, 'module': module, 'kind': kind,
@@ -66,7 +115,7 @@ def discuss(snapshot, question, publish, provider=None, on_event=None):
                        'summary': summary, **extra})
         if on_event:
             on_event({'events': list(events), 'discussion': list(transcript),
-                      'sources': sources, 'verified_evidence': snapshot, 'synthetic': True})
+                      'sources': sources, 'verified_evidence': snapshot, 'synthetic': True, **priority_state})
 
     specs = [runtime.schema('read_evidence', '查询场景证据；可指定证据编号读取原文与提供人。未指定则返回全量证据和部门反馈。',
                             {'evidence_id': runtime.text_schema([row['id'] for row in sources])})]
@@ -99,10 +148,8 @@ def discuss(snapshot, question, publish, provider=None, on_event=None):
                 queue_event('query', ('程序预读证据 ' if preload else 'Agent查询证据 ') +
                             (args.get('evidence_id') or '清单、约束及前序部门反馈'),
                             tool=tool, query=args, origin=origin)
-                result = {'evidence': snapshot, 'sources': selected, 'discussion': prior_feedback}
-                if args.get('evidence_id'):
-                    result['evidence'] = {'facts': [[row['label'], row['text']] for row in selected],
-                                          'boundary': snapshot['boundary']}
+                result = _model_payload(model_snapshot, selected, prior_feedback,
+                                        single_source=bool(args.get('evidence_id')))
                 read_ids.update(row['id'] for row in selected)
                 queue_event('evidence', '读取到 ' + str(len(selected)) + ' 条证据；可展开核对原文',
                             source_ids=[row['id'] for row in selected], tool=tool, origin=origin,
@@ -125,6 +172,8 @@ def discuss(snapshot, question, publish, provider=None, on_event=None):
                                          budget=model_budget, tool_budget=tool_budget,
                                          initial_evidence=initial_evidence)
                 row = {'module': module, 'phase': phase, 'status': 'done', 'answer': answer}
+                if priority_state and phase == '处置建议':
+                    row.update(final_decision(answer, policy, assessment))
             except Exception:
                 # Provider failures remain local; no credentials/raw provider errors
                 # enter business logs. Other departments still finish their checks.
@@ -156,15 +205,31 @@ def discuss(snapshot, question, publish, provider=None, on_event=None):
         return completed
 
     task = '这是合成场景真实模型讨论。程序已预读并附上本轮证据和前序反馈，可直接据此回答；仅在需要单条原文时再调用read_evidence。只引用证据编号，不虚构事实。evidence_precedence、verified_plan和calculation是程序约束。其他Agent可能出错，必须按原始证据纠正，不能把部门推测复述为事实。只用最多3条短句：发现（附证据ID）、分歧/未知、下一步交给谁。总字数不超过120字，不重复背景，不写标题或表格。不编造人员姓名。' + question
+    if priority_state:
+        task += (' 本轮排序只能采用 priority_policy；priority_assessment 是本轮程序测算，原消息里的部门优先诉求仅为历史背景。'
+                 '围绕用户本次问题回答：先保谁、该顺序是否可行、另一单承担什么缺口、下一步谁核实什么。'
+                 '优先级不等于审批，不增加库存；确定供给与条件供给分开，逐单核对需料时点，不能把数量配平说成能开工。'
+                 '若 assessment 为 needs_verification，暂停数量承诺，先核实补充信息。')
     departments = ('buying', 'selling', 'stock', 'manufacturing')
+    final_format = ''
+    if priority_state:
+        final_format = (' 本轮输出格式例外：只输出一个JSON对象，不使用代码围栏。字段为'
+                        'policy_version（本轮priority_policy.version）、order（本轮完整工单顺序数组）、'
+                        'confirmed_gap、conditional_gap（来自本轮assessment.totals）、'
+                        'allocations（按本轮顺序，每项包含work_order、required、confirmed_allocated、confirmed_gap、conditional_allocated、conditional_gap）、'
+                        'execution_authorized（false）、summary（最多120字的三条短句建议，回答本次问题并说明未满足条件）。'
+                        'needs_verification时两个总缺口为null且allocations为空数组；不得使用旧计算填充。'
+                        '以上字段必须依据程序数据，summary也须与其一致；JSON整体不限120字，只限制summary。')
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix='supply-discussion') as executor:
         run_phase(executor, departments, '部门初核', task + ' 从本部门说明事实、冲突、待确认条件。')
         run_phase(executor, ('control',), '总控追问', task + ' 读取四部门反馈，指出分歧并向各部门提出需要复核的问题；不得执行。')
         run_phase(executor, departments, '部门复核', task + ' 读取总控追问和其他部门反馈，回应本部门问题；无证据则明确待确认。')
-        final = run_phase(executor, ('control',), '处置建议', task + ' 汇总两轮反馈，列出可选方案、数量依据、增量费用、待确认条件、责任人与审批事项。明确失败部门。没有基线不能宣称节省。')[0]
+        final = run_phase(executor, ('control',), '处置建议', task + ' 汇总两轮反馈，列出可选方案、数量依据、增量费用、待确认条件、责任人与审批事项。明确失败部门。没有基线不能宣称节省。' + final_format)[0]
     failed = any(row['status'] == 'failed' for row in transcript)
     answer = '模型讨论已结束，所有部门发言与建议仍需核实，不代表事实已确认。\n' + final['answer']
-    if snapshot.get('verified_plan') and not snapshot.get('human_sources'):
+    if not priority_state and snapshot.get('deterministic_conclusion') and not snapshot.get('human_sources'):
+        answer = snapshot['deterministic_conclusion']
+    elif not priority_state and snapshot.get('verified_plan') and not snapshot.get('human_sources'):
         answer = ('【程序核算结论；模型发言仅供复核】\n'
                   '若备用采购获批且150件于11月3日09:00可用，220+150=370件，可在10:00用料截止前完整满足销售300件，余70件。这不是成品交付保证。\n'
                   '生产原08:00开工仍无法满足。原厂200件于14:00可用已确认，70+200=270；生产改期至11月4日获批后可分配240件，余30。\n'
@@ -172,7 +237,11 @@ def discuss(snapshot, question, publish, provider=None, on_event=None):
                   '下方保留真实模型原话用于复核。模型可能误述时间或成本，不得据此直接执行。')
     if failed:
         answer += '\n部分讨论未完成，不能作为完整处置方案。'
-    return {'answer': answer, 'review_required': True,
+    if priority_state:
+        priority_state['decision_check'] = final.get('decision_check', {
+            'status': 'unverified', 'summary': '总控模型本轮未完成，尚无通过核对的建议。',
+            'issues': ['最终回复不可用'], 'policy_version': policy['version']})
+    return {'answer': answer, 'review_required': True, **priority_state,
             'events': events, 'sources': sources, 'discussion': transcript, 'verified_evidence': snapshot, 'trace': trace, 'offers': [], 'synthetic': True,
             'mode': '真实模型讨论 / 合成证据 / 不执行', 'partial': failed,
             'timing': {'total_ms': round((time.monotonic() - started_at) * 1000),

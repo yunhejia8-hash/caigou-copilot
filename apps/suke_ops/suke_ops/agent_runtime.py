@@ -24,6 +24,10 @@ DRAFT_RULE = 'offer_draft 只提供待人工打开的草稿入口，不代表已
 ACTION_RULE = '每轮结束前必须调用 report_action 说明本轮产出、原因和可执行的下一步。仅分析用 analysis_only；有待决策、缺数据、无权限或工具不支持时用 blocked，明确具体缺项及谁需要做什么，不得只说“待负责人处理”。有实际草稿入口才用 draft_ready，create_material_request 返回真实单号后才用 document_created。'
 DEMAND_RULE = '用户提出明确采购需求时，应登记物料需求单，而不是一直分析或直接跳到采购订单。总控委派 buying-demand，采购及需求Agent先用 read_request_context 核实物料、单位、公司和仓库，再调用 create_material_request 保存采购类型需求单草稿，返回单号。用户已经表达采购需求且资料齐全时不再次询问是否建单。只有分析问题、不包含实际采购需求时不得创建单据。'
 DEMAND_INPUT_RULE = '数量和需求日期必须来自用户或已核实的来源单据；名称有歧义、缺少数量、日期或单位时一次列出全部缺项及可选项。公司和仓库可使用工具返回的实际默认值并在答复中说明，不得猜测供应商、价格或日期。销售生产优先级尚未选择通常不阻止登记已明确的采购需求，但不得自行把缺口数字当成用户已批准的采购数量。'
+DEMAND_TURN_RULE = '''按本轮最新用户请求确定当前动作。历史轮次中的“仅核算、不登记”等限制只适用于当时的任务；用户本轮明确要求登记时按新请求处理。历史已确认的物料、数量等事实仍可沿用，只有本轮修改或新证据冲突时才更新；历史助手猜测不能当作用户确认。
+不得重复追问已明确的物料编码、数量、单位、日期、公司和仓库。指定完整物料编码就已选定物料，其他候选物料存在不构成该编码的歧义。物料选择必须来自本轮或历史用户原话中的编码/完整名称；主数据候选、业务证据中的规格、助手旧建议均不等于用户已经选定。“手机配件”等泛称即使只搜索到一个候选也应先请用户选择，不得猜成数据线。仅缺哪些登记必填字段就一次问清哪些字段；单位和公司仓库仍须用主数据工具核实。日期口径也不得把证据中的建议时刻当成用户已经澄清。
+需求单草稿登记只需有效物料、采购数量、单位、需求日期、公司和仓库；供应商、报价、预算选择属于后续流程，不是登记前置条件。历史质检、库存缺口和交期风险应单列说明，不因仍有待核实风险而重复索要已确认字段。对明确批准的采购量保持原数登记草稿，不将缺口自动改为采购量；数量有冲突如实报告、不擅改；用户要求先解决冲突再登记时须等待。
+总控收到资料齐全的登记请求时，应直接委派需求登记；给子Agent完整传达用户已确认字段和当前动作，不能用过期的“仅分析”任务替代它。本轮仍只要求分析或尚缺必要信息时，不得创建单据。'''
 PROCUREMENT_RULE = '后续流程：需求单由用户核对提交后，通过 inquiry_from_request 提供询价草稿，收集真实供应商报价并比价，用户选择有效报价后通过 purchase_from_quotation 准备采购草稿，再申请协同审批，批准后才提交正式采购订单。不得跳过用户要求的比价审批，不伪造报价。其余草稿支持采购单转收货、销售单转发货、工单转完工入库；不支持新建生产工单或催办任务单时说明能力缺口，不要反复索要不能解除此限制的确认。'
 
 SPECIALTY = {
@@ -111,6 +115,13 @@ def validate_input(value, spec):
         raise RuntimeError('模型工具参数不符合授权范围。')
 
 
+def delegation_question(original, delegated):
+    """保留当前用户的原话，避免总控改写时丢字段或沿用旧限制。"""
+    return ('【本轮原始用户请求】\n' + original + '\n【总控委派说明】\n' + delegated +
+            '\n委派说明不能撤销本轮原始用户请求中明确的登记要求或已确认字段，也不得扩大原始用户授权；'
+            '若用户本轮仅分析、不建单，即使委派要求建单也不能创建。历史轮次限制按其适用轮次解释。')
+
+
 def respond(module, question, history, tool_specs, dispatch, trace, provider=None, budget=None, tool_budget=None,
             initial_evidence=None, batch_dispatch=None):
     """每个 Agent 使用独立提示词和工具集合，共享总调用预算，不开放递归委派。"""
@@ -126,6 +137,8 @@ def respond(module, question, history, tool_specs, dispatch, trace, provider=Non
         system += '\n' + DEMAND_RULE + '\n' + DEMAND_INPUT_RULE
     elif 'ask_module' in allowed:
         system += '\n用户提出明确采购需求且资料齐全时，委派 buying-demand 核实并登记需求单草稿，返回真实单号；缺项一次问清。仅分析问题时不得建单。\n' + DEMAND_INPUT_RULE
+    if 'create_material_request' in allowed or 'ask_module' in allowed:
+        system += '\n' + DEMAND_TURN_RULE
     if 'offer_draft' in allowed:
         system += '\n' + DRAFT_RULE + '\n' + PROCUREMENT_RULE
     if module == 'control' and 'read_module_reports' in allowed:
@@ -133,9 +146,14 @@ def respond(module, question, history, tool_specs, dispatch, trace, provider=Non
     if 'ask_module' in allowed:
         system += '\n需要深入分析时调用 ask_module 委派给相关模块。'
     system += '\n模块Agent的回答同时作为向总控的汇报，必须说明已发现问题、业务依据、影响、处理建议及需要总控协调的事项；无问题或未核实须如实标注。默认先给结论，再列最多5条关键事实与下一步，用户要求细节时再展开。摘要问题读取一次模块面板即可回答，只有用户明确要求某张单据细节时才继续逐单查询。每个模块仅委派一次，先取得所有相关模块摘要再汇总。每批最多6个工具；同样参数只查询一次。模块失败时明确列出未核实部分，不得补造事实。'
-    if module in ('buying', 'buying-demand', 'buying-inquiry', 'buying-comparison'):
-        system += '\n用户描述新采购需求时调用 procurement_intake；提供报价、要求比价时调用 procurement_compare；用户明确要求网上查价时调用 procurement_search。它们复用需有据仓库后台。工具的missing/issues/errors必须如实追问，金额只引用计算结果。网页结果仅为参考，不是供应商承诺。不得编造评分或声称已创建ERP单据。报价修改须提供完整新版报价，不能沿用旧价格假定已更新。'
-    messages = [*history[-8:], {'role': 'user', 'content': question}]
+    if 'procurement_intake' in allowed:
+        system += '\n私有PDF申请使用 procurement_intake，报价比较使用 procurement_compare，明确联网查价使用 procurement_search。桥接工具结果不代表正式ERP建单；缺项须如实追问，金额只引用程序结果，不编造评分。参考价不代表供应商承诺，报价修改必须核实本版条款。'
+        if 'create_material_request' in allowed:
+            system += '\n用户明确要求登记原生ERP需求单时，优先 read_request_context/create_material_request 原生路径，不调用PDF桥接；已保存单号须依据真实工具结果回报。'
+    # 保留已确认事实，同时标清旧动作限制的作用范围；不把助手旧结论升级为事实。
+    messages = [{**message, 'content': '【历史轮次，仅作背景，动作限制适用于当时】\n' + message['content']}
+                if isinstance(message.get('content'), str) else dict(message) for message in history[-8:]]
+    messages.append({'role': 'user', 'content': '【本轮最新用户请求】\n' + question})
     if initial_evidence is not None:
         system += '\n程序已预读本轮依据，无需再次读取相同面板。'
         if 'ask_module' in allowed:

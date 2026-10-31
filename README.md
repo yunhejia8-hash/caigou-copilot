@@ -6,10 +6,18 @@
 - **模块工作台**：采购、销售、库存、生产各有独立 Agent 对话和数据看板；全局数据页提供跨模块概览。
 - **采购六环节**：物料需求单、询价、比价、审批、采购、入库分别配备专项 Agent、独立会话及进度数据。销售、库存、生产只显示本模块 Agent。
 - **便捷交互**：快捷问题点击即发送；Enter 发送，Shift+Enter 换行。
+- **供应变更追溯演示**：总控点击「200→120 供应变更」，先查看原始消息，再发起真实四部门核查；完成后加载 10:18 新消息，对照旧方案及受影响工单。人物与单据明确为合成设定，实际加载账号另行记录。
+- **本次订单优先级**：连接器演示可指定先保 A 或 B，并记录理由、账号、时间和策略版本；四部门与总控读取同一策略，按订单需料时点检查条件，原有四阶段协作过程保留。
 
 采购人员可直接询问“哪些采购订单延期了？”或“连接器延期会影响哪些交付？”。助手根据当前账号可见的业务数据给出依据和下一步建议；业务取舍及审批由负责人决定。供应商议价为模拟功能。
 
-基于 ERPNext，保留上游 GPL-3.0 许可与版权。技术边界及部署记录见 [DELIVERY.md](DELIVERY.md)，依赖清单见 [focus_manifest.json](apps/erpnext/erpnext/focus_manifest.json)。
+新演示区分确定量缺口与条件缺口：780 件账面库存扣除 420 件预留、160 件待检后，自由量 200 件；A、B 关联工单需求只计一次，共 560 件，确定量缺口 360 件。申请释放 C 的 160 件及可能提前的 200 件只能形成候选方案；提前批变为 120 件后，候选量 480 件。先保 A 时，A 候选 240、B 候选 240，B 缺 80；先保 B 时，B 候选 320、A 候选 160，A 缺 80，A 所需提前批必须在 09:00 前合格可用。预留审批、补回、到仓和本厂放行仍待确认，优先级不构成审批或开工承诺。原消息、版本和旧讨论均保留；人员补充会暂停数值结论。详见 [本地验收](verification/TRACE_CASE.md) 与 [优先级验收](verification/PRIORITY_POLICY.md)。
+
+规则面板区分企业排序策略、本案例硬约束与需求计量口径，并提供参考来源；它们不是所有电子企业通用的行业法规。程序分配与真实总控建议分别显示，最终总控的排序、版本、数量与执行状态字段会与本轮计算核对；字段一致也不等于其文字建议、到货条件或审批已经验证。配置目前用于连接器合成案例，未写入真实 ERP 订单优先级或自动调整库存。
+
+聊天默认突出短结论和待办；核查中逐步显示部门反馈，结束后收起协作细节。原话、单据快照、来源版本及操作步骤可分别展开，不把模型发言当作员工承诺。
+
+基于 ERPNext，保留上游 GPL-3.0 许可与版权。依赖清单见 [focus_manifest.json](apps/erpnext/erpnext/focus_manifest.json)。
 
 ## 启动
 
@@ -27,7 +35,7 @@ docker compose ps -a
 
 默认模型服务为 `https://api.openai-next.com`，模型为 `gpt-6.1-sol`。`configure_model.py` 隐藏输入 API Key，仅更新本地 `.env` 中的三个模型变量，保留数据库口令、管理员口令和端口；也可从 `ANTHROPIC_AUTH_TOKEN` 环境变量读取 Key。连接验证只发送合成测试内容，检查工具调用及结果返回，不读取业务数据。未填写 Key 时仍可使用手动业务。配置示例见 [.env.example](.env.example)。已有部署修改配置后运行 `docker compose up -d --build`，待后端启动完成再运行 `docker compose restart frontend` 刷新代理连接。
 
-若要选 Claude，可运行 `python tools/configure_model.py --model claude-sonnet-4-6`；其他兼容服务可通过 `--base-url` 和 `--model` 指定。沿用现有 Anthropic Messages 协议，GPT Sol 已通过本机工具调用验证；平台说明见 [接入文档](https://credits.openai-next.com/guide/quickstart)。
+其他兼容服务可通过 `--base-url` 和 `--model` 指定。沿用现有 Anthropic Messages 协议，GPT Sol 已通过本机工具调用验证；平台说明见 [接入文档](https://credits.openai-next.com/guide/quickstart)。
 
 口令、数据库、模型凭据、日志、配置备份不入 Git。真实模型服务通过 `ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`、`ANTHROPIC_AUTH_TOKEN` 环境变量配置；未配置时明确提示不可用，规则计算和手动业务仍可使用。供应商议价仅为模拟。
 
@@ -68,7 +76,7 @@ python tools/verify_realtime.py
 
 需求登记回归命令：`docker compose exec -T backend bench --site focus.local execute suke_ops.demand_integration.run`。如需重复真实模型测试：`docker compose exec -T backend bench --site focus.local execute suke_ops.demand_integration.run_live`；后者使用已配置模型服务并发送合成需求及最小主数据，两项测试均回滚测试业务变更。
 
-本次已在用户明确授权后，用 `api.deepseek.com` 对合成数据完成真实总控和四模块协作，记录见 [model-live.json](verification/model-live.json)。工具协议参考 [DeepSeek Anthropic 兼容说明](https://api-docs.deepseek.com/guides/anthropic_api/)。部署到其他环境时需自行配置模型服务并明确业务数据的外发授权，仓库不附带凭据。
+当前部署通过 `https://api.openai-next.com` 调用 `gpt-6.1-sol`，实际模型以运行容器的 `ANTHROPIC_MODEL` 为准。部署到其他环境时需自行配置模型服务并明确业务数据的外发授权，仓库不附带凭据。
 
 启动前在 PowerShell 环境中配置上述三个 `ANTHROPIC_*` 变量，或写入仅本地的 `.env`；服务读取后端环境变量。更新代码后执行 `docker compose up -d --build`，如有单据结构变更再运行 `docker compose exec -T backend bench --site focus.local migrate`。
 
@@ -122,7 +130,7 @@ python -u -B tools/run_scenario_demo.py
 
 场景证据由服务端 `scenario_facts.json` 选择；只暴露只读证据工具，不读取真实 ERP 单据、不提供执行工具。程序核算首例数量与费用；其他案例的模型推理需人工复核。最多30次模型请求、40次工具读取；部门失败显式标记，不能当作完整方案。对话目标也会发往已配置模型平台，请仅输入合成问题。
 
-比赛平台文档：https://credits.openai-next.com/guide/quickstart 。Anthropic 协议地址为 `https://api.openai-next.com`，当前默认模型为 `gpt-6.1-sol`，也可配置 `claude-sonnet-4-6`。密钥只填写本地被忽略的 `.env`，不随仓库分发。保留其他兼容模型服务配置能力。更新后重建 Docker 并执行 main 要求的迁移和导航更新。
+比赛平台文档：https://credits.openai-next.com/guide/quickstart 。Anthropic 协议地址为 `https://api.openai-next.com`，当前默认模型为 `gpt-6.1-sol`。密钥只填写本地被忽略的 `.env`，不随仓库分发。保留其他兼容模型服务配置能力。更新后重建 Docker 并执行 main 要求的迁移和导航更新。
 
 真实模型实测曾出现新旧证据及交期混淆，因此首例补充证据后另列程序核算；新证据优先于旧状态，部门回答不作为新业务事实。程序展示不能保证模型解释完全正确，最终审批仍需逐项核实。
 首例含补充证据时，最终结论由确定性程序模板提供，模型原话保留为待核实讨论；已测试模型即使误述09:00与10:00的先后顺序，也不能覆盖该程序结论。其余场景暂没有同等的完整程序方案保障。
@@ -170,3 +178,12 @@ python -u -B tools/run_scenario_demo.py
 总控在同一批委派的独立部门最多四路同时请求模型；业务权限检查、数据库查询及留痕仍由调用线程依次执行，不在线程间共享 Frappe 会话。每轮先按当前账号读取面板，并复用本轮相同快照（保留读取时间），避免让模型先请求同一数据再生成回复。依赖其他部门结果的任务仍须分批，部分失败会明确标记。
 
 合成场景保留四部门初核、总控追问、四部门复核、总控建议，部门轮次并行、轮次之间等待完成。程序预读与模型主动查询分开标记；常规路径由约20次模型请求减为10次。结果记录整体耗时、部门耗时与模型请求数，具体速度受平台响应、查询数量影响。历史会话一次获取，隐藏的主页页签不继续刷新协同足迹。
+# 小熊总控入口
+
+登录 Desk 后，右下角显示「发财熊」（用户提供的 `bear-pet-web.zip`）。保留拖动、摸摸、喂蜂蜜、跳舞、睡眠、收起和触摸操作；双击或点「聊天」向总控 Agent 提问。
+
+小熊通过 `suke_ops.hub.chat_status/start/poll` 使用现有总控流程，固定 `module=control`，与总控主页共用当前标签页的会话。不会直接调用模型供应商，也不在前端保存密钥。回答以纯文本显示；详细协作记录、业务草稿及审批入口仍在总控主页。取消仅停止前端等待，后台分析可能继续；未结束前不重复提交任务。重新加载页面后聊天窗口为空，历史可在总控主页恢复。
+
+内嵌图片的 `public/bear-pet.js` 来自用户提供组件，只调整了总控提示、停止提示、安全错误显示和最长等待上限（16 分钟，以覆盖服务端 15 分钟任务）。桥接代码位于 `public/bear-control.js`，由 `hooks.py` 在登录界面加载。
+
+验证：`node --test tests/*.cjs`、`python -m unittest discover -s tests -p 'test_*.py'`。新部署须按本文既有 Docker 构建启动流程重新构建并启动，再执行 `python tools/verify_assets.py --url <部署地址>` 检查小熊资源。GitHub 仓库更新本身不代表运行中的服务器已更新。

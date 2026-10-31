@@ -15,7 +15,8 @@ def verify(base_url):
     missing = required - manifest.keys()
     if missing:
         raise RuntimeError('静态资源清单缺少：' + ', '.join(sorted(missing)))
-    assets = sorted(set(manifest.values()) | {'/assets/suke_ops/hub.js', '/assets/suke_ops/hub.css'})
+    assets = sorted(set(manifest.values()) | {'/assets/suke_ops/hub.js', '/assets/suke_ops/hub.css',
+                    '/assets/suke_ops/bear-pet.js', '/assets/suke_ops/bear-control.js'})
     for path in assets:
         # 只请求本部署的静态资源，禁止清单引导请求外部地址。
         parsed = urlparse(path)
