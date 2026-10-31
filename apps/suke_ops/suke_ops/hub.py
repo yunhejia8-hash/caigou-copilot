@@ -14,6 +14,15 @@ MODULE_DOCS = {
     'stock': ['Item', 'Warehouse', 'Bin', 'Stock Reservation Entry', 'Purchase Order', 'Purchase Receipt', 'Stock Entry', 'Stock Reconciliation', 'Quality Inspection'],
     'manufacturing': ['BOM', 'Production Plan', 'Work Order', 'Job Card', 'Stock Entry'],
 }
+STAGE_DOCS = {
+    'buying-demand': ['Material Request', 'Item', 'Bin'],
+    'buying-inquiry': ['Request for Quotation', 'Supplier Quotation', 'Supplier', 'Material Request'],
+    'buying-comparison': ['Supplier Quotation', 'Request for Quotation', 'Supplier', 'Item'],
+    'buying-approval': ['Operations Approval', 'Purchase Order', 'Supplier Quotation'],
+    'buying-order': ['Purchase Order', 'Material Request', 'Supplier Quotation', 'Supplier'],
+    'buying-receipt': ['Purchase Receipt', 'Purchase Order', 'Quality Inspection', 'Bin', 'Warehouse'],
+}
+AGENT_DOCS = {**MODULE_DOCS, **STAGE_DOCS}
 LABELS = {'Material Request': '采购申请', 'Request for Quotation': '询价', 'Supplier Quotation': '供应商报价',
           'Purchase Order': '采购订单', 'Supplier': '供应商', 'Customer': '客户', 'Quotation': '销售报价',
           'Sales Order': '销售订单', 'Delivery Note': '发货', 'Sales Invoice': '销售账单', 'Item': '物料',
@@ -22,6 +31,7 @@ LABELS = {'Material Request': '采购申请', 'Request for Quotation': '询价',
           'BOM': '物料清单', 'Production Plan': '生产计划', 'Work Order': '工单', 'Job Card': '工序执行'}
 SHARED_DOCS = ['Supply Case', 'Supply Decision', 'Operations Approval']
 FIELDS = ['name', 'modified', 'docstatus', 'status', 'title', 'supplier', 'customer', 'company', 'currency',
+          'material_request_type', 'per_ordered', 'valid_till', 'source_type', 'source_name', 'reason',
           'report_date', 'inspection_type', 'reference_type', 'reference_name', 'sample_size', 'grand_total', 'schedule_date', 'delivery_date', 'transaction_date', 'posting_date', 'per_received',
           'per_delivered', 'production_item', 'qty', 'produced_qty', 'planned_start_date', 'item_code',
           'warehouse', 'actual_qty', 'reserved_qty', 'reserved_stock', 'projected_qty', 'workflow_state']
@@ -40,7 +50,7 @@ def require_user():
 
 
 def check_module(module, control=False):
-    if module not in MODULE_DOCS and not (control and module == 'control'):
+    if module not in AGENT_DOCS and not (control and module == 'control'):
         frappe.throw('模块不在授权范围。', frappe.PermissionError)
 
 
@@ -67,6 +77,8 @@ def count(doctype, filters):
 
 def module_board(module):
     check_module(module)
+    if module in STAGE_DOCS:
+        return stage_board(module)
     if module in ('buying', 'selling'):
         purchase = module == 'buying'
         doctype = 'Purchase Order' if purchase else 'Sales Order'
@@ -96,6 +108,83 @@ def module_board(module):
             'rows': rows, 'row_limit': 12, 'access': frappe.has_permission(doctype, 'read'),
             'links': [{'doctype': dt, 'label': LABELS[dt]} for dt in MODULE_DOCS[module]
                       if dt != 'Bin' and frappe.has_permission(dt, 'read')]}
+
+
+def stage_scope(module, doctype):
+    if module in STAGE_DOCS:
+        if doctype == 'Material Request':
+            return {'material_request_type': 'Purchase'}
+        if doctype == 'Operations Approval':
+            return {'source_type': 'Purchase Order'}
+    return {}
+
+
+def stage_board(module):
+    """进度直接引用业务状态和完成比例；六环节计数不是同一批单据的漏斗。"""
+    definitions = {
+        'buying-demand': ('Material Request', [('schedule_date', '需求日期'), ('per_ordered', '已订购 %')], [
+            ('待提交', {'docstatus': 0}), ('待采购', {'docstatus': 1, 'per_ordered': ['<', 100], 'status': ['not in', ['Stopped', 'Cancelled']]}),
+            ('已订购', {'docstatus': 1, 'per_ordered': ['>=', 100]})]),
+        'buying-inquiry': ('Request for Quotation', [('transaction_date', '询价日期'), ('schedule_date', '需求日期')], [
+            ('询价草稿', {'docstatus': 0}), ('已提交询价', {'docstatus': 1}), ('已取消询价', {'docstatus': 2})]),
+        'buying-comparison': ('Supplier Quotation', [('supplier', '供应商'), ('currency', '币种'), ('grand_total', '报价总额'), ('valid_till', '有效至')], [
+            ('报价草稿', {'docstatus': 0}), ('已提交报价', {'docstatus': 1}), ('已过有效期', {'docstatus': 1, 'valid_till': ['<', nowdate()]})]),
+        'buying-approval': ('Operations Approval', [('source_name', '采购单'), ('reason', '申请说明')], [
+            ('待审批', {'workflow_state': '待审批'}), ('已驳回', {'workflow_state': '已驳回'}), ('已批准', {'workflow_state': '已批准'})]),
+        'buying-order': ('Purchase Order', [('supplier', '供应商'), ('schedule_date', '订单交期'), ('per_received', '已收货 %')], [
+            ('订单草稿', {'docstatus': 0}), ('待收货', {'docstatus': 1, 'per_received': ['<', 100], 'status': ['not in', ['Closed', 'Cancelled']]}),
+            ('已收齐', {'docstatus': 1, 'per_received': ['>=', 100]}),
+            ('已逾期订单', {'docstatus': 1, 'per_received': ['<', 100], 'status': ['not in', ['Closed', 'Cancelled']], 'schedule_date': ['<', nowdate()]})]),
+        'buying-receipt': ('Purchase Receipt', [('supplier', '供应商'), ('posting_date', '收货日期'), ('grand_total', '金额'), ('currency', '币种')], [
+            ('待提交收货', {'docstatus': 0}), ('已提交收货', {'docstatus': 1, 'is_return': 0}), ('退货单', {'docstatus': 1, 'is_return': 1})]),
+    }
+    doctype, extra_columns, progress = definitions[module]
+    scope = stage_scope(module, doctype)
+    metrics = [{'label': label, 'value': count(doctype, {**scope, **filters}), 'unit': '单'} for label, filters in progress]
+    sections = []
+    if module == 'buying-receipt':
+        sections, _ = board_details('stock', [])
+        sections = [row for row in sections if row['doctype'] == 'Quality Inspection']
+        sections.insert(0, {'doctype': 'Purchase Order', 'label': '待到货订单', 'access': frappe.has_permission('Purchase Order', 'read'),
+                           'columns': [('name', '订单'), ('supplier', '供应商'), ('schedule_date', '交期'), ('per_received', '已收货 %')],
+                           'rows': records('Purchase Order', {'docstatus': 1, 'per_received': ['<', 100], 'status': ['not in', ['Closed', 'Cancelled']]})})
+        metrics.append({'label': '质检不合格', 'value': count('Quality Inspection', {'docstatus': ['<', 2], 'inspection_type': 'Incoming', 'status': 'Rejected'}), 'unit': '单'})
+        sections[-1]['rows'] = records('Quality Inspection', {'inspection_type': 'Incoming', 'docstatus': ['<', 2]})
+    elif module == 'buying-inquiry':
+        sections.append({'doctype': 'Supplier Quotation', 'label': '已收到的报价（需按询价单核对）',
+                         'access': frappe.has_permission('Supplier Quotation', 'read'),
+                         'columns': [('name', '报价单'), ('supplier', '供应商'), ('status', '状态'), ('valid_till', '有效至')],
+                         'rows': records('Supplier Quotation', {'docstatus': ['<', 2]})})
+    signals = [f"{metric['label']}：{metric['value']}单，需跟进。" for metric in metrics
+               if metric['value'] and metric['label'] in ('待采购', '已过有效期', '待审批', '已驳回', '待收货', '已逾期订单', '质检不合格')]
+    rows = records(doctype, {**scope, 'docstatus': ['<', 2]})
+    if module != 'buying-approval':
+        lines = []
+        for row in rows:
+            detail = read_record(module, doctype, row.name)
+            for item in detail.get('suppliers' if module == 'buying-inquiry' else 'items', []):
+                lines.append({**row, **item, 'name': row.name})
+            if module == 'buying-order' and any(item.get('schedule_date') and str(item['schedule_date']) != str(row.get('schedule_date')) for item in detail.get('items', [])):
+                signals.append(f"{row.name}：订单交期与物料行交期不一致，请核实实际供货安排。")
+        if module == 'buying-inquiry':
+            columns = [('name', '询价单'), ('supplier', '供应商'), ('quote_status', '报价进度'), ('email_sent', '已发邮件')]
+        else:
+            columns = [('name', '单号'), ('item_code', '物料'), ('qty', '数量'), ('uom', '单位')]
+            if module == 'buying-comparison':
+                columns += [('supplier', '供应商'), ('rate', '单价'), ('currency', '币种'), ('schedule_date', '交期')]
+            elif module == 'buying-order':
+                columns += [('received_qty', '已收货'), ('schedule_date', '物料交期')]
+            elif module == 'buying-receipt':
+                columns += [('warehouse', '入库仓库'), ('quality_inspection', '质检单')]
+            else:
+                columns += [('schedule_date', '需求日期')]
+        sections.insert(0, {'doctype': doctype, 'label': '供应商回复进度' if module == 'buying-inquiry' else '物料明细（最近单据，最多60行）',
+                           'columns': columns, 'access': frappe.has_permission(doctype, 'read'), 'rows': lines[:60]})
+    return {'module': module, 'label': runtime.MODULES[module], 'as_of': nowdate(), 'doctype': doctype,
+            'metrics': metrics, 'sections': sections, 'signals': signals, 'access': frappe.has_permission(doctype, 'read'),
+            'rows': rows, 'row_limit': 12,
+            'columns': [('name', '单号'), ('workflow_state' if module == 'buying-approval' else 'status', '进度 / 状态'), *extra_columns],
+            'note': '按当前账号权限统计；列表显示最近12笔。进度以各单据状态为准，环节间数量不能直接当作转化率。'}
 
 
 def board_details(module, metrics):
@@ -130,7 +219,7 @@ def board_details(module, metrics):
 def latest_reports():
     # 同一账号的模块分析自动成为总控可读汇报，保留源会话和时间。
     result = []
-    for module in MODULE_DOCS:
+    for module in AGENT_DOCS:
         rows = frappe.get_list('Agent Turn', filters={'owner': frappe.session.user, 'agent_module': module, 'state': 'done'},
                               fields=['name', 'answer', 'modified'], order_by='modified desc', limit_page_length=1)
         if rows:
@@ -139,9 +228,20 @@ def latest_reports():
 
 
 @frappe.whitelist()
-def dashboard():
+def dashboard(module='control', view='chat'):
     require_user()
+    check_module(module, control=True)
+    if view == 'data' and module != 'control':
+        if module not in MODULE_DOCS:
+            frappe.throw('请选择业务模块的数据页。')
+        approval_types = {'buying': ['Purchase Order'], 'selling': ['Sales Order'],
+                          'stock': ['Stock Entry'], 'manufacturing': ['Work Order']}
+        return {'modules': [module_board(module)], 'stages': [], 'reports': [], 'at': str(now_datetime()),
+                'model_ready': runtime.configured(), 'cases': [], 'decisions': [],
+                'approvals': records('Operations Approval', {'source_type': ['in', approval_types[module]],
+                                    'workflow_state': ['in', ['待审批', '已驳回']]}, 6)}
     return {'reports': latest_reports(), 'modules': [module_board(module) for module in MODULE_DOCS], 'at': str(now_datetime()),
+            'stages': [stage_board(key) for key in STAGE_DOCS] if module == 'buying' or module in STAGE_DOCS else [],
             'model_ready': runtime.configured(), 'cases': records('Supply Case', limit=6),
             'approvals': records('Operations Approval', {'workflow_state': ['in', ['待审批', '已驳回']]}, 6),
             'decisions': records('Supply Decision', {'workflow_state': ['in', ['待审批', '已驳回']]}, 6)}
@@ -213,25 +313,33 @@ def poll(name):
 
 
 @frappe.whitelist()
-def history(conversation):
+def history(conversation, module=None):
     require_user()
     conversation = str(uuid.UUID(conversation))
-    rows = frappe.get_list('Agent Turn', filters={'owner': frappe.session.user, 'conversation': conversation},
+    filters = {'owner': frappe.session.user, 'conversation': conversation}
+    if module is not None:
+        check_module(module, control=True)
+        filters['agent_module'] = module
+    rows = frappe.get_list('Agent Turn', filters=filters,
                            fields=['name', 'question', 'answer', 'agent_module', 'state'],
                            order_by='creation desc, name desc', limit_page_length=50)
     return list(reversed(rows))
 
 
 def read_record(module, doctype, name):
-    if doctype not in MODULE_DOCS[module] + SHARED_DOCS:
+    if doctype not in AGENT_DOCS[module] + SHARED_DOCS:
         frappe.throw('单据不属于该模块的工具范围。', frappe.PermissionError)
     doc = frappe.get_doc(doctype, name)
     doc.check_permission('read')
+    for key, value in stage_scope(module, doctype).items():
+        if doc.get(key) != value:
+            frappe.throw('单据不属于该采购环节。', frappe.PermissionError)
     result = {field: doc.get(field) for field in fields_for(doctype)}
     result['doctype'] = doctype
-    for table in ('items', 'required_items'):
+    for table in ('items', 'required_items', 'suppliers'):
         if doc.meta.has_field(table) and not cint(doc.meta.get_field(table).permlevel):
-            item_fields = ['item_code', 'qty', 'stock_qty', 'rate', 'warehouse', 'schedule_date',
+            item_fields = ['item_code', 'qty', 'stock_qty', 'rate', 'uom', 'stock_uom', 'conversion_factor', 'amount', 'warehouse', 'schedule_date',
+                           'supplier', 'quote_status', 'email_sent', 'request_for_quotation', 'material_request', 'purchase_order', 'quality_inspection',
                            'delivery_date', 'received_qty', 'delivered_qty', 'required_qty', 'consumed_qty', 'source_warehouse']
             result[table] = [{key: row.get(key) for key in item_fields if row.meta.has_field(key)
                               and not cint(row.meta.get_field(key).permlevel)} for row in doc.get(table)[:30]]
@@ -264,16 +372,20 @@ def draft_offer(module, action, source):
 
 
 def module_tools(module):
-    return [runtime.schema('read_module_board', '读取当前账号可见的模块指标和最近12笔未完成单据', {}),
+    specs = [runtime.schema('read_module_board', '读取当前环节或模块的进度、指标和最近12笔单据', {}),
             runtime.schema('list_records', '列出指定类型最近12笔单据；不是全部记录',
-                           {'doctype': runtime.text_schema(MODULE_DOCS[module] + SHARED_DOCS)}, ['doctype']),
+                           {'doctype': runtime.text_schema(AGENT_DOCS[module] + SHARED_DOCS)}, ['doctype']),
             runtime.schema('read_record', '读取指定单据摘要及最多30行物料',
-                           {'doctype': runtime.text_schema(MODULE_DOCS[module] + SHARED_DOCS), 'name': runtime.text_schema()}, ['doctype', 'name']),
+                           {'doctype': runtime.text_schema(AGENT_DOCS[module] + SHARED_DOCS), 'name': runtime.text_schema()}, ['doctype', 'name']),
             runtime.schema('compare_supply_case', '调用程序计算现存、锁定、待确认供货及销售/生产两方案',
-                           {'name': runtime.text_schema()}, ['name']),
-            runtime.schema('offer_draft', '仅建议打开原生未保存草稿；用户点击后重新校验源版本和权限，不会自动保存或提交',
+                           {'name': runtime.text_schema()}, ['name'])]
+    if module == 'buying':
+        specs.append(runtime.schema('read_procurement_progress', '读取采购六环节的进度和专项Agent最新汇报', {}))
+    if module in MODULE_DOCS:
+        specs.append(runtime.schema('offer_draft', '仅建议打开原生未保存草稿；用户点击后重新校验源版本和权限，不会自动保存或提交',
                            {'action': runtime.text_schema([key for key, value in DRAFTS.items() if value[0] == module]),
-                            'source': runtime.text_schema()}, ['action', 'source'])]
+                            'source': runtime.text_schema()}, ['action', 'source']))
+    return specs
 
 
 def run_turn(name):
@@ -297,6 +409,9 @@ def run_turn(name):
                     ({'role': 'user', 'content': row.question}, {'role': 'assistant', 'content': row.answer})]
 
         def dispatch(module, tool, args):
+            if module == 'buying' and tool == 'read_procurement_progress':
+                return {'stages': [stage_board(key) for key in STAGE_DOCS],
+                        'reports': [row for row in latest_reports() if row['module'] in STAGE_DOCS]}
             if module == 'control' and tool == 'read_module_reports':
                 return {'reports': latest_reports(), 'current_boards': [module_board(key) for key in MODULE_DOCS],
                         'note': '历史汇报可能过时，业务事实须按当前面板核实。'}
@@ -320,14 +435,14 @@ def run_turn(name):
                     budget[0] -= initial - child_budget[0]
                 module_results.append(result)
                 return result
-            if module not in MODULE_DOCS:
+            if module not in AGENT_DOCS:
                 frappe.throw('未知模块。', frappe.PermissionError)
             if tool == 'read_module_board':
                 return module_board(module)
             if tool == 'list_records':
-                if args['doctype'] not in MODULE_DOCS[module] + SHARED_DOCS:
+                if args['doctype'] not in AGENT_DOCS[module] + SHARED_DOCS:
                     frappe.throw('单据越权。', frappe.PermissionError)
-                return {'rows': records(args['doctype']), 'limit': 12}
+                return {'rows': records(args['doctype'], stage_scope(module, args['doctype'])), 'limit': 12}
             if tool == 'read_record':
                 return read_record(module, **args)
             if tool == 'compare_supply_case':
@@ -343,7 +458,7 @@ def run_turn(name):
             frappe.throw('未授权工具。', frappe.PermissionError)
 
         specs = [runtime.schema('ask_module', '委派任务给指定业务 Agent，必要时依次询问多个模块',
-                                {'module': runtime.text_schema(MODULE_DOCS), 'question': runtime.text_schema()}, ['module', 'question'])] \
+                                {'module': runtime.text_schema(AGENT_DOCS), 'question': runtime.text_schema()}, ['module', 'question'])] \
             if turn.agent_module == 'control' else module_tools(turn.agent_module)
         if turn.agent_module == 'control':
             specs.append(runtime.schema('read_module_reports', '读取各模块已上报分析与最新风险面板；研判上报时先调用', {}))

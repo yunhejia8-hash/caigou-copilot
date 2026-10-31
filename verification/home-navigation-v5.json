@@ -1,0 +1,48 @@
+{
+  "homeUrl": "http://127.0.0.1:8081/desk/%E4%B8%BB%E9%A1%B5/operations-hub",
+  "agents": [
+    {
+      "label": "库存",
+      "url": "http://127.0.0.1:8081/desk/%E4%B8%BB%E9%A1%B5/operations-hub",
+      "agent": "库存 Agent"
+    },
+    {
+      "label": "生产",
+      "url": "http://127.0.0.1:8081/desk/%E4%B8%BB%E9%A1%B5/operations-hub",
+      "agent": "生产 Agent"
+    },
+    {
+      "label": "总控",
+      "url": "http://127.0.0.1:8081/desk/%E4%B8%BB%E9%A1%B5/operations-hub",
+      "agent": "总控 Agent"
+    }
+  ],
+  "businessNavigation": [
+    {
+      "module": "采购",
+      "url": "http://127.0.0.1:8081/desk/buying/operations-buying",
+      "homeLinks": 0,
+      "data": "/desk/buying/operations-data-buying"
+    },
+    {
+      "module": "销售",
+      "url": "http://127.0.0.1:8081/desk/selling/operations-selling",
+      "homeLinks": 0,
+      "data": "/desk/selling/operations-data-selling"
+    },
+    {
+      "module": "库存",
+      "url": "http://127.0.0.1:8081/desk/stock/operations-stock",
+      "homeLinks": 0,
+      "data": "/desk/stock/operations-data-stock"
+    },
+    {
+      "module": "生产",
+      "url": "http://127.0.0.1:8081/desk/manufacturing/operations-manufacturing",
+      "homeLinks": 0,
+      "data": "/desk/manufacturing/operations-data-manufacturing"
+    }
+  ],
+  "draftPreserved": true,
+  "cardSwitchStayedOnHome": true
+}

@@ -122,8 +122,15 @@ def repair_existing_reservations():
 def customize_navigation():
     from frappe.desk.doctype.dock.dock import resolve_app_dock, save_site_dock
     from frappe.desk.doctype.custom_sidebar.custom_sidebar import get_site_sidebar_layer, save_site_sidebar
-    keep = ['Buying', 'Selling', 'Stock', 'Manufacturing']
+    # 独立模块不继承 Buying 的自定义菜单，主页只提供总控和全局数据。
+    from frappe.modules.import_file import import_file_by_path
+    if not frappe.db.exists('Module Def', 'Supply Home'):
+        frappe.get_doc({'doctype': 'Module Def', 'module_name': 'Supply Home', 'app_name': 'suke_ops'}).insert()
+    import_file_by_path(frappe.get_app_path('suke_ops', 'supply_home', 'sidebar', '主页', '主页.json'), force=True)
+    keep = ['主页', 'Buying', 'Selling', 'Stock', 'Manufacturing']
     rows = resolve_app_dock('erpnext', upto='site', gated=False)
+    if not any(row.get('link_to') == '主页' for row in rows):
+        rows.insert(0, {'link_type': 'Sidebar', 'link_to': '主页', 'title': '主页', 'icon': 'house', 'added': 1})
     for row in rows:
         row['hidden'] = int(row.get('link_to') not in keep)
     rows.sort(key=lambda r: keep.index(r.get('link_to')) if r.get('link_to') in keep else 99)
@@ -140,7 +147,7 @@ def customize_navigation():
         slug = {'Buying': 'buying', 'Selling': 'selling', 'Stock': 'stock', 'Manufacturing': 'manufacturing'}[module]
         label = {'Buying': '采购', 'Selling': '销售', 'Stock': '库存', 'Manufacturing': '生产'}[module]
         entries = [(label + '工作台', 'operations-' + slug, 'message-circle'),
-                   ('总控主页', 'operations-hub', 'home'), ('全局数据', 'operations-data', 'list')]
+                   (label + '数据', 'operations-data-' + slug, 'list')]
         desired = [{'type': 'Link', 'label': label, 'link_type': 'Page', 'link_to': target,
                     'added': 1, 'hidden': 0, 'open_in_new_tab': 0, 'icon': icon}
                    for label, target, icon in entries]

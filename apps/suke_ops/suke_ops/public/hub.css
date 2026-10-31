@@ -26,18 +26,22 @@
 .hub-chat-page .hub-empty h2{font-size:22px}
 .hub-chat-page .hub-state{font-size:11px}
 .hub-data-toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;font-weight:600}
+.hub-scope{font-size:12px;color:#718175;font-weight:400}.hub-toolbar-actions{display:flex;align-items:center;gap:12px}.hub-data-page .hub-summary{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}.hub-data-page .hub-panel{padding:18px 22px}.hub-data-page .hub-panel h3{margin:0 0 14px}.hub-data-section+.hub-data-section{border-top:1px solid var(--hub-line);margin-top:24px;padding-top:20px}.hub-detail-link{display:inline-block;margin-top:12px;color:var(--hub-green)}.hub-signals{padding-left:20px;margin-bottom:0;line-height:1.9}.hub-case-list{margin-top:16px;border-top:1px solid var(--hub-line);padding-top:12px}.hub-case-list summary{cursor:pointer;color:#61766a}.hub-data-page .hub-detail{margin-top:18px}.hub-data-page .hub-section-label{letter-spacing:.5px}
 .hub-data-panels{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.hub-data-section>summary{cursor:pointer;font-weight:600;padding:4px 0}.hub-data-section>summary span{float:right;font-size:12px;font-weight:400;color:#718175}.hub-data-section[open]>summary{margin-bottom:16px}.hub-data-section+.hub-data-section{margin-top:16px;padding-top:16px}
 .hub-data-page .hub-detail h3:not(:first-child){margin-top:24px}
 .hub-data-page .hub-detail .hub-section-label{margin-top:20px}
 @media(max-width:800px){.hub-chat-page{height:calc(100dvh - 115px);padding:0 0 8px;min-height:320px}.hub-chat-page .hub-tabs button{padding:10px}.hub-chat-page .hub-messages{padding:12px}.hub-data-panels{grid-template-columns:1fr}.hub-chat-page .hub-composer{margin:0 8px 8px}.hub-chat-page .hub-prompts{margin:8px}}
 
 .hub-chat-page{max-width:none;height:calc(100dvh - 100px)}
+.hub-home>.hub-tabs{margin:0 12px;min-height:48px}.hub-home .hub-chat-page{height:calc(100dvh - 150px)}.hub-home-pane[hidden]{display:none!important}.supply-hub button.hub-module-card{width:100%;background:white;text-align:left}.supply-hub button.hub-module-card:hover{background:var(--hub-soft)}
 .hub-workspace{display:grid;grid-template-columns:minmax(380px,1.2fr) minmax(330px,1fr);gap:24px;flex:1;min-height:0}
 .hub-module-board{overflow:auto;min-height:0;border-left:1px solid var(--hub-line);padding:16px;font-size:13px}
 .hub-module-board h3{font-size:15px;margin:24px 0 12px}.hub-module-board p{color:#7a877e}
 .hub-module-board table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}.hub-module-board td,.hub-module-board th{padding:10px;border-bottom:1px solid var(--hub-line);text-align:left}
 .hub-module-board details{padding:12px 0;border-bottom:1px solid var(--hub-line)}
 .hub-module-card{display:flex;justify-content:space-between;gap:12px;border:1px solid var(--hub-line);padding:14px;margin:10px 0;border-radius:10px;color:var(--hub-ink)}
+.hub-stage-overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:20px}.hub-stage-card{display:flex;flex-direction:column;gap:8px;padding:14px;border:1px solid var(--hub-line);border-radius:10px;color:var(--hub-ink)}.hub-stage-card span{font-size:11px;color:#718175}.hub-stage-card:hover{background:var(--hub-soft);text-decoration:none}.hub-reload{border:1px solid var(--hub-line);border-radius:8px;background:white;padding:6px 12px;color:var(--hub-green)}.hub-reports{margin:20px 0}.hub-tabs a:focus-visible,.hub-stage-card:focus-visible{outline:3px solid #9fc7b4;outline-offset:-3px}
 .hub-tabs a{padding:13px 20px;color:#728177;white-space:nowrap;border-bottom:3px solid transparent;text-decoration:none}.hub-tabs a[aria-current=page]{border-color:var(--hub-green);color:var(--hub-green);font-weight:700}
 a.hub-metric{display:block;text-decoration:none}.hub-module-board .hub-summary{grid-template-columns:repeat(2,minmax(120px,1fr))}.hub-module-board .hub-metric{padding:10px}.hub-module-board .hub-metric strong{font-size:23px}
 @media(max-width:900px){.hub-workspace{display:flex;flex-direction:column;overflow:auto}.hub-chat-page .hub-chat{flex:none;height:65dvh}.hub-module-board{overflow:visible;border-left:0;border-top:1px solid var(--hub-line)}.hub-tabs a{padding:12px}}
